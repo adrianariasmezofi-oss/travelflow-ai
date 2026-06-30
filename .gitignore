@@ -1,0 +1,19 @@
+# OS / editor cruft
+.DS_Store
+Thumbs.db
+*.tmp
+*~
+.~lock.*#
+
+# Editor / IDE
+.vscode/
+.idea/
+
+# Local agent / tooling state
+.claude/
+*.log
+
+# Secrets — if you ever split credentials into a separate file
+secrets.js
+.env
+.env.local

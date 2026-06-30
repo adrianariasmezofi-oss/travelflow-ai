@@ -1,0 +1,1523 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<title>TravelFlow AI</title>
+
+<!--
+  ╔══════════════════════════════════════════════════════════════╗
+  ║  CONFIGURATION — paste your Supabase credentials below       ║
+  ║                                                              ║
+  ║  1. Supabase project → Settings → API                        ║
+  ║  2. "Project URL"   → SUPABASE_URL                           ║
+  ║  3. "anon public"   → SUPABASE_ANON                          ║
+  ║                                                              ║
+  ║  Run this SQL once in your Supabase SQL editor:              ║
+  ║                                                              ║
+  ║  create table if not exists public.trips (                   ║
+  ║    id        uuid primary key default gen_random_uuid(),     ║
+  ║    user_id   uuid references auth.users not null,            ║
+  ║    name      text not null,                                  ║
+  ║    origin    jsonb,                                          ║
+  ║    plan      jsonb default '[]'::jsonb,                      ║
+  ║    saved_at  timestamptz default now()                       ║
+  ║  );                                                          ║
+  ║  alter table public.trips enable row level security;         ║
+  ║  create policy "own trips" on public.trips for all           ║
+  ║    using (auth.uid() = user_id);                             ║
+  ╚══════════════════════════════════════════════════════════════╝
+-->
+
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css"/>
+<link rel="preconnect" href="https://fonts.googleapis.com"/>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet"/>
+
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { height: 100%; overflow: hidden; font-family: 'Inter', system-ui, sans-serif; }
+  #root { height: 100vh; width: 100vw; }
+  .leaflet-container { background: #e8eef5 !important; }
+  .leaflet-control-zoom { border: none !important; }
+  .leaflet-control-zoom a { border:none !important; background:rgba(255,255,255,0.92) !important; color:#334155 !important; width:32px !important; height:32px !important; line-height:32px !important; font-size:16px !important; border-radius:10px !important; margin-bottom:4px !important; display:block; box-shadow:0 2px 8px rgba(15,23,42,0.12) !important; backdrop-filter:blur(8px); }
+  .leaflet-control-zoom a:hover { background:white !important; }
+  @keyframes spin    { from { transform:rotate(0deg); } to { transform:rotate(360deg); } }
+  @keyframes ping    { 0% { transform:scale(1); opacity:0.7; } 100% { transform:scale(2.6); opacity:0; } }
+  @keyframes fadeIn  { from { opacity:0; transform:translateY(6px); } to { opacity:1; transform:translateY(0); } }
+  @keyframes slideUp { from { opacity:0; transform:translateY(20px); } to { opacity:1; transform:translateY(0); } }
+  ::-webkit-scrollbar { width:4px; }
+  ::-webkit-scrollbar-track { background:transparent; }
+  ::-webkit-scrollbar-thumb { background:rgba(0,0,0,0.14); border-radius:2px; }
+  input[type=range] { accent-color:#2563eb; cursor:pointer; }
+  button { font-family:inherit; }
+  .poi-card { transition:box-shadow 0.15s, transform 0.15s; }
+  .poi-card:hover { box-shadow:0 4px 16px rgba(15,23,42,0.09) !important; transform:translateY(-1px); }
+  .cat-chip { transition:all 0.12s; }
+  .cat-chip:hover { transform:scale(1.04); }
+  .tl-stop { animation: slideUp 0.22s ease both; }
+  /* Numbered map-pin name labels */
+  .pin-label { background:rgba(255,255,255,0.94) !important; border:none !important; border-radius:6px !important; box-shadow:0 1px 5px rgba(15,23,42,0.20) !important; font-family:Inter,sans-serif !important; font-size:10px !important; font-weight:600 !important; color:#0f172a !important; padding:1px 6px !important; white-space:nowrap; }
+  .pin-label::before { display:none !important; }
+  .pin-label-hi { background:#2563eb !important; color:white !important; font-weight:700 !important; box-shadow:0 2px 10px rgba(37,99,235,0.5) !important; }
+</style>
+</head>
+<body>
+<div id="root"></div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"></script>
+<script crossorigin src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+<script crossorigin src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.5/babel.min.js"></script>
+
+<script type="text/babel" data-presets="react">
+
+// ╔═══════════════════════════════════════════════════╗
+// ║  PASTE YOUR SUPABASE CREDENTIALS HERE             ║
+// ╚═══════════════════════════════════════════════════╝
+const SUPABASE_URL  = "YOUR_SUPABASE_URL";
+const SUPABASE_ANON = "YOUR_SUPABASE_ANON_KEY";
+
+let sb = null;
+try { if (!SUPABASE_URL.startsWith("YOUR_")) sb = supabase.createClient(SUPABASE_URL, SUPABASE_ANON); } catch {}
+
+const { useState, useEffect, useRef, useMemo, useCallback } = React;
+
+// ═══════════════════════════════════════════════════
+//  CONSTANTS
+// ═══════════════════════════════════════════════════
+const CAT_LABEL = {
+  food:"Food", drink:"Cafés & bars", beach:"Beaches", museum:"Museums",
+  viewpoint:"Viewpoints", adventure:"Adventure", attraction:"Attractions",
+  park:"Parks", historic:"Historic", shopping:"Markets",
+  nightlife:"Nightlife", wellness:"Wellness",
+  hotel:"Hotels & stays", tour:"Tours & experiences",
+};
+const CAT_ICON = {
+  food:"🍽️", drink:"☕", beach:"🏖️", museum:"🏛️",
+  viewpoint:"🌄", adventure:"🥾", attraction:"🎡", park:"🌳",
+  historic:"🏰", shopping:"🛍️", nightlife:"🌃", wellness:"🧖",
+  hotel:"🏨", tour:"🎟️",
+};
+// Categories that are NOT included in the day itinerary planner
+const CAT_PLAN_EXCLUDE = new Set(["hotel"]);
+const ALL_CATS = Object.keys(CAT_LABEL);
+
+const BAND_LABEL = { very_close:"Very close", nearby:"Nearby", short_drive:"Short drive", further_away:"Further away" };
+const BAND_HINT  = { very_close:"<5 min walk", nearby:"5–20 min walk", short_drive:"5–15 min drive", further_away:"20+ min" };
+const BAND_COLOR = { very_close:"#16a34a", nearby:"#0ea5e9", short_drive:"#f59e0b", further_away:"#94a3b8" };
+
+// Typical activity duration in minutes
+const ACTIVITY_DURATION = {
+  food:75, drink:30, beach:150, museum:105,
+  viewpoint:25, adventure:120, attraction:75, park:45,
+  historic:50, shopping:60, nightlife:150, wellness:90,
+  tour:150, hotel:0,
+};
+
+// Descriptive activity labels used in the timeline
+const ACTIVITY_LABEL = {
+  food:      (h) => h < 11 ? "Breakfast" : h < 15 ? "Lunch" : "Dinner",
+  drink:     (h) => h < 11 ? "Morning coffee" : h < 17 ? "Café break" : "Evening drinks",
+  beach:     ()  => "Beach time",
+  museum:    ()  => "Museum visit",
+  viewpoint: (h) => h > 17 ? "Sunset viewpoint" : "Panoramic viewpoint",
+  adventure: ()  => "Adventure activity",
+  attraction:()  => "Attraction visit",
+  park:      (h) => h < 10 ? "Morning walk" : h < 17 ? "Park stroll" : "Evening walk",
+  historic:  ()  => "Historical site",
+  shopping:  ()  => "Market & shopping",
+  nightlife: ()  => "Night out",
+  wellness:  ()  => "Wellness & spa",
+  tour:      ()  => "Guided tour / experience",
+  hotel:     ()  => "Accommodation",
+};
+
+const QUICK = [
+  { label:"Lisbon",  country:"Portugal",  cc:"PT", lat:38.7223, lng:-9.1393,   type:"city"   },
+  { label:"Tokyo",   country:"Japan",     cc:"JP", lat:35.6762, lng:139.6503,  type:"city"   },
+  { label:"Paris",   country:"France",    cc:"FR", lat:48.8566, lng:2.3522,    type:"city"   },
+  { label:"Athens",  country:"Greece",    cc:"GR", lat:37.9838, lng:23.7275,   type:"city"   },
+  { label:"Bali",    country:"Indonesia", cc:"ID", lat:-8.4095, lng:115.1889,  type:"island" },
+  { label:"New York",country:"USA",       cc:"US", lat:40.7128, lng:-74.0060,  type:"city"   },
+];
+
+// ═══════════════════════════════════════════════════
+//  UTILITIES
+// ═══════════════════════════════════════════════════
+const haversineKm = (a, b) => {
+  const R=6371, toR=d=>d*Math.PI/180;
+  const dLat=toR(b.lat-a.lat), dLng=toR(b.lng-a.lng);
+  return 2*R*Math.asin(Math.min(1,Math.sqrt(Math.sin(dLat/2)**2+Math.sin(dLng/2)**2*Math.cos(toR(a.lat))*Math.cos(toR(b.lat)))));
+};
+
+const bandFor   = km => km<0.5?"very_close":km<2?"nearby":km<10?"short_drive":"further_away";
+const effortFor = km => km<0.25?`${Math.max(1,Math.round(km*1000/80))} min walk`:km<2?`${Math.round(km/0.083)} min walk`:km<12?`~${Math.max(5,Math.round(km/0.67))} min drive`:`~${Math.round(km/60)} h drive`;
+
+// Travel time in minutes + mode
+function travelBetween(a, b) {
+  const km = haversineKm({ lat:a.lat, lng:a.lng }, { lat:b.lat, lng:b.lng });
+  const walk = km < 1.5;
+  const minutes = walk ? Math.max(2, Math.round(km * 12)) : Math.max(4, Math.round(km * 2.5));
+  return { km, minutes, mode: walk ? "walk" : "drive" };
+}
+
+function formatTime(date) {
+  return date.toLocaleTimeString([], { hour:"2-digit", minute:"2-digit", hour12:false });
+}
+
+function formatDuration(min) {
+  if (min < 60) return `${min} min`;
+  const h = Math.floor(min / 60), m = min % 60;
+  return m ? `${h}h ${m}min` : `${h}h`;
+}
+
+function formatDist(km) {
+  return km < 1 ? `${Math.round(km*1000)}m` : `${km.toFixed(1)}km`;
+}
+
+function classifyTags(t={}) {
+  if (["restaurant","fast_food","food_court"].includes(t.amenity)) return "food";
+  if (["cafe","bar","pub","biergarten"].includes(t.amenity))       return "drink";
+  if (t.natural==="beach"||t.beach)                                return "beach";
+  if (["museum","gallery"].includes(t.tourism))                    return "museum";
+  if (t.tourism==="viewpoint"||t.natural==="peak")                 return "viewpoint";
+  if (["hotel","hostel","guest_house","motel","apartment","chalet","resort"].includes(t.tourism)) return "hotel";
+  if (t.shop==="travel_agency"||t.amenity==="tour_guide"||t.tourism==="yes"&&t["guided_tours"]==="yes") return "tour";
+  if (["attraction","theme_park","zoo","aquarium"].includes(t.tourism)) return "attraction";
+  if (["park","garden","nature_reserve"].includes(t.leisure))      return "park";
+  if (t.historic)                                                  return "historic";
+  if (["mall","department_store","marketplace"].includes(t.shop))  return "shopping";
+  if (t.amenity==="nightclub")                                     return "nightlife";
+  if (t.amenity==="spa"||t.leisure==="spa"||t.amenity==="sauna")   return "wellness";
+  if (/^(hiking|bicycle|mtb)$/.test(t.route||"")||
+      /^(climbing|scuba_diving|surfing|kitesurfing|canoeing|kayaking|rafting|paragliding)$/.test(t.sport||"")||
+      t.leisure==="sports_centre"||t.natural==="cliff")            return "adventure";
+  return null;
+}
+
+// Extract price / quality signal from OSM tags
+function getPriceTier(tags={}) {
+  // Hotel star rating → ⭐⭐⭐
+  if (tags.stars) {
+    const n = parseInt(tags.stars)||0;
+    return n>0 ? "⭐".repeat(Math.min(5,n)) : null;
+  }
+  // Restaurant price level (1-4 scale, sometimes set by mappers)
+  if (tags.price_level) {
+    const n = parseInt(tags.price_level)||0;
+    return n>0 ? "$".repeat(Math.min(4,n)) : null;
+  }
+  // Free-form price range or charge
+  if (tags.price_range) return tags.price_range;
+  if (tags.charge)      return tags.charge;
+  // Free / paid flag
+  if (tags.fee==="no")  return "Free entry";
+  if (tags.fee==="yes") return "Paid entry";
+  return null;
+}
+
+// Booking affiliate URL builders (fill in your affiliate IDs later)
+const BOOKING_AFFILIATE_ID = "YOUR_BOOKING_AFFILIATE_ID";
+const GYG_AFFILIATE_ID     = "YOUR_GYG_AFFILIATE_ID";
+
+function bookingUrl(name, lat, lng) {
+  const q = encodeURIComponent(name);
+  // Replace YOUR_BOOKING_AFFILIATE_ID with your real ID when ready
+  return `https://www.booking.com/searchresults.html?ss=${q}&aid=${BOOKING_AFFILIATE_ID}`;
+}
+function gygUrl(name, lat, lng) {
+  const q = encodeURIComponent(name);
+  return `https://www.getyourguide.com/s/?q=${q}&partner_id=${GYG_AFFILIATE_ID}`;
+}
+const subtypeOf = t => t.amenity||t.tourism||t.leisure||t.historic||t.shop||t.natural||"place";
+
+// ═══════════════════════════════════════════════════
+//  SMART PLAN GENERATOR — time-aware, nearest-neighbour
+// ═══════════════════════════════════════════════════
+function buildDaySequence(hour) {
+  // Returns ordered list of [category, contextLabel] pairs for the time of day.
+  // Each pair is what to propose next. We'll pick the closest available POI per slot.
+  if (hour < 9) return [
+    ["drink","Morning coffee"],["tour","Morning guided tour"],["park","Morning walk"],
+    ["museum","Museum visit"],["historic","Historical site"],["food","Lunch"],
+    ["viewpoint","Afternoon views"],["attraction","Afternoon attraction"],
+    ["shopping","Market stop"],["drink","Sunset drinks"],["food","Dinner"],["nightlife","Night out"],
+  ];
+  if (hour < 11) return [
+    ["drink","Coffee"],["tour","Guided tour"],["museum","Morning museum"],
+    ["historic","Historical site"],["food","Lunch"],["park","Afternoon walk"],
+    ["viewpoint","Views"],["attraction","Afternoon visit"],["shopping","Market"],
+    ["food","Dinner"],["drink","Evening drink"],["nightlife","Night out"],
+  ];
+  if (hour < 13) return [
+    ["food","Lunch"],["tour","Afternoon tour"],["museum","Afternoon museum"],
+    ["historic","Historical site"],["viewpoint","Views"],["park","Walk"],
+    ["beach","Beach"],["shopping","Market"],["drink","Sunset aperitif"],
+    ["food","Dinner"],["nightlife","Night out"],
+  ];
+  if (hour < 16) return [
+    ["tour","Guided experience"],["museum","Afternoon museum"],["attraction","Attraction"],
+    ["viewpoint","Views"],["park","Afternoon walk"],["beach","Beach time"],
+    ["historic","Historical site"],["shopping","Market & shopping"],
+    ["drink","Sunset drinks"],["food","Dinner"],["nightlife","Night out"],
+  ];
+  if (hour < 19) return [
+    ["viewpoint","Sunset viewpoint"],["drink","Aperitif"],
+    ["food","Dinner"],["wellness","Relax"],["nightlife","Night out"],
+  ];
+  return [
+    ["food","Dinner"],["drink","Drinks"],["nightlife","Night out"],
+  ];
+}
+
+function generateSmartPlan(pois, enabledCats, startTime = new Date()) {
+  const hour = startTime.getHours() + startTime.getMinutes() / 60;
+  const sequence = buildDaySequence(Math.floor(hour));
+
+  // Index POIs by category, sorted closest first (hotels shown in Places only, not in day plan)
+  const byCat = new Map();
+  for (const p of pois) {
+    if (!enabledCats.has(p.category)) continue;
+    if (CAT_PLAN_EXCLUDE.has(p.category)) continue;
+    const arr = byCat.get(p.category) ?? []; arr.push(p); byCat.set(p.category, arr);
+  }
+  for (const [,arr] of byCat) arr.sort((a,b)=>a.distance_km-b.distance_km);
+
+  const result = [], usedIds = new Set();
+  let lastPos = null;
+
+  for (const [cat, contextLabel] of sequence) {
+    if (!enabledCats.has(cat)) continue;
+    const available = (byCat.get(cat)??[]).filter(p=>!usedIds.has(p.id));
+    if (!available.length) continue;
+
+    // Nearest-neighbour: pick closest to previous stop (or closest to origin if first)
+    const pick = lastPos
+      ? available.reduce((best,p) => haversineKm(lastPos,p) < haversineKm(lastPos,best) ? p : best)
+      : available[0];
+
+    usedIds.add(pick.id);
+    // Inject context label + hour for dynamic labels
+    result.push({ ...pick, _context: contextLabel, _startHour: Math.floor(hour + result.length * 0.75) });
+    lastPos = { lat: pick.lat, lng: pick.lng };
+  }
+  return result;
+}
+
+// ═══════════════════════════════════════════════════
+//  TIMELINE — add start times, durations, travel legs
+// ═══════════════════════════════════════════════════
+function buildTimeline(plan, startTime = new Date()) {
+  const timeline = [];
+  let cursor = new Date(startTime);
+
+  for (let i = 0; i < plan.length; i++) {
+    const p      = plan[i];
+    const next   = plan[i + 1];
+    const startAt   = new Date(cursor);
+    const durMin    = ACTIVITY_DURATION[p.category] ?? 60;
+    cursor = new Date(cursor.getTime() + durMin * 60_000);
+    const endAt     = new Date(cursor);
+    const actHour   = startAt.getHours();
+    const actLabel  = p._context ?? (ACTIVITY_LABEL[p.category]?.(actHour) ?? CAT_LABEL[p.category]);
+
+    let leg = null;
+    if (next) {
+      const { km, minutes, mode } = travelBetween(p, next);
+      cursor = new Date(cursor.getTime() + minutes * 60_000);
+      leg = { km, minutes, mode };
+    }
+    timeline.push({ ...p, startAt, endAt, durMin, actLabel, leg });
+  }
+  return timeline;
+}
+
+// ═══════════════════════════════════════════════════
+//  POI DISCOVERY (single combined Overpass query)
+// ═══════════════════════════════════════════════════
+const OVERPASS_ENDPOINTS = [
+  "https://overpass-api.de/api/interpreter",
+  "https://overpass.kumi.systems/api/interpreter",
+  "https://overpass.private.coffee/api/interpreter",
+];
+
+async function runOverpass(query, signal) {
+  // Hedged parallel requests: fire all mirrors with a stagger so we don't
+  // hammer every server when the first one is fast.
+  // Delay: mirror[0]=0ms, mirror[1]=1500ms, mirror[2]=3000ms.
+  // Whichever answers first wins; the rest are cancelled immediately.
+  const body    = "data=" + encodeURIComponent(query);
+  const headers = { "Content-Type": "application/x-www-form-urlencoded", Accept: "application/json" };
+  const acs     = OVERPASS_ENDPOINTS.map(() => new AbortController());
+  const STAGGER = [0, 1500, 3000];
+  const timers  = [];
+
+  const cancelAll = () => {
+    acs.forEach(ac => ac.abort());
+    timers.forEach(t => clearTimeout(t));
+  };
+  if (signal) signal.addEventListener("abort", cancelAll);
+
+  const promises = OVERPASS_ENDPOINTS.map((url, i) =>
+    new Promise((resolve, reject) => {
+      timers[i] = setTimeout(() => {
+        if (signal?.aborted || acs[i].signal.aborted) return reject(new Error("aborted"));
+        fetch(url, { method:"POST", body, headers, signal: acs[i].signal })
+          .then(r => r.ok ? r.json() : Promise.reject(new Error("bad status")))
+          .then(d => Array.isArray(d?.elements) ? resolve(d.elements) : reject(new Error("no elements")))
+          .catch(reject);
+      }, STAGGER[i]);
+    })
+  );
+
+  try {
+    const elements = await Promise.any(promises);
+    cancelAll();
+    return elements;
+  } catch {
+    return [];
+  } finally {
+    if (signal) signal.removeEventListener("abort", cancelAll);
+  }
+}
+
+async function fetchWikipediaPOIs(origin, radiusM, signal) {
+  const ac = new AbortController();
+  const u = ()=>ac.abort(); signal?.addEventListener("abort",u);
+  setTimeout(()=>ac.abort(),6_000);
+  try {
+    const url="https://en.wikipedia.org/w/api.php?"+new URLSearchParams({action:"query",list:"geosearch",gscoord:`${origin.lat}|${origin.lng}`,gsradius:String(Math.min(radiusM,10_000)),gslimit:"50",format:"json",origin:"*"});
+    const res=await fetch(url,{signal:ac.signal}); if(!res.ok) return [];
+    const {query}=await res.json();
+    return (query?.geosearch??[]).map(row=>{
+      const km=haversineKm(origin,{lat:row.lat,lng:row.lon});
+      const low=row.title.toLowerCase();
+      let cat="attraction";
+      if (/\b(park|garden|reserve|bosque|parque)\b/.test(low)) cat="park";
+      else if (/\b(museum|museo|gallery)\b/.test(low)) cat="museum";
+      else if (/\b(beach|playa|praia)\b/.test(low)) cat="beach";
+      else if (/\b(peak|summit|mount|volcano|cerro)\b/.test(low)) cat="viewpoint";
+      else if (/\b(church|cathedral|castle|fort|ruins|temple|mosque)\b/.test(low)) cat="historic";
+      return {id:`wiki-${row.pageid}`,name:row.title,category:cat,subtype:"wikipedia",lat:row.lat,lng:row.lon,distance_km:km,band:bandFor(km),effort:effortFor(km),tags:{source:"wikipedia"}};
+    });
+  } catch { return []; }
+  finally { signal?.removeEventListener("abort",u); }
+}
+
+async function fetchNominatimFallback(origin, radiusM, thinCats, signal) {
+  const rKm=Math.min(radiusM/1000,20), latD=rKm/111;
+  const lngD=rKm/(111*Math.max(0.2,Math.cos(origin.lat*Math.PI/180)));
+  const viewbox=[origin.lng-lngD,origin.lat+latD,origin.lng+lngD,origin.lat-latD].join(",");
+  const QS={food:"restaurant",drink:"cafe bar",beach:"beach",museum:"museum gallery",viewpoint:"viewpoint mirador",attraction:"tourist attraction",park:"park garden",historic:"historic monument church",shopping:"mall market",nightlife:"nightclub",wellness:"spa wellness",adventure:"hiking trail",hotel:"hotel hostel accommodation",tour:"tour operator guided tours experiences"};
+  const out=[],seen=new Set();
+  for (const cat of thinCats.slice(0,5)) {
+    if (signal?.aborted) break;
+    const q=QS[cat]; if(!q) continue;
+    const ac=new AbortController(); const u=()=>ac.abort(); signal?.addEventListener("abort",u);
+    const t=setTimeout(()=>ac.abort(),4_000);
+    try {
+      const res=await fetch(`https://nominatim.openstreetmap.org/search?${new URLSearchParams({q,format:"json",limit:"15","accept-language":"en",bounded:"1",viewbox,addressdetails:"0"})}`,{signal:ac.signal});
+      if(!res.ok) continue;
+      for (const row of await res.json()) {
+        const lat=Number(row.lat),lng=Number(row.lon);
+        if(!isFinite(lat)||!isFinite(lng)) continue;
+        const km=haversineKm(origin,{lat,lng}); if(km*1000>radiusM) continue;
+        const name=row.name||row.display_name.split(",")[0]; if(!name) continue;
+        const k=`${name.toLowerCase()}|${lat.toFixed(3)}|${lng.toFixed(3)}`;
+        if(seen.has(k)) continue; seen.add(k);
+        out.push({id:`nom-${row.place_id}-${cat}`,name,category:cat,subtype:row.type||"place",lat,lng,distance_km:km,band:bandFor(km),effort:effortFor(km),tags:{source:"nominatim"}});
+      }
+    } catch {}
+    finally { clearTimeout(t); signal?.removeEventListener("abort",u); }
+  }
+  return out;
+}
+
+const _poiCache=new Map(), CACHE_TTL=5*60_000;
+
+async function fetchNearbyPOIs(origin, radiusM=25_000, signal) {
+  const ck=`${origin.lat.toFixed(2)}|${origin.lng.toFixed(2)}`; // ~1 km grid → cache survives small pans
+  const hit=_poiCache.get(ck);
+  if(hit&&Date.now()-hit.ts<CACHE_TTL) return hit.pois;
+
+  const {lat,lng}=origin;
+  const r5=Math.min(radiusM,5_000),r8=Math.min(radiusM,8_000),r12=Math.min(radiusM,12_000),r25=Math.min(radiusM,25_000);
+
+  // ONE combined query → was 12+ sequential requests in original app
+  const query=`[out:json][timeout:22];(
+    nwr["amenity"~"^(restaurant|fast_food|food_court)$"](around:${r5},${lat},${lng});
+    nwr["amenity"~"^(cafe|bar|pub|biergarten)$"](around:${r5},${lat},${lng});
+    nwr["amenity"="nightclub"](around:${r5},${lat},${lng});
+    nwr["amenity"~"^(spa|sauna)$"](around:${r8},${lat},${lng});
+    nwr["leisure"="spa"](around:${r8},${lat},${lng});
+    nwr["tourism"~"^(museum|gallery)$"](around:${r12},${lat},${lng});
+    nwr["tourism"="viewpoint"](around:${r25},${lat},${lng});
+    nwr["tourism"~"^(attraction|theme_park|zoo|aquarium)$"](around:${r12},${lat},${lng});
+    nwr["natural"="beach"](around:${r25},${lat},${lng});
+    nwr["natural"~"^(peak|cliff)$"](around:${r25},${lat},${lng});
+    nwr["leisure"~"^(park|garden|nature_reserve)$"](around:${r12},${lat},${lng});
+    nwr["leisure"="sports_centre"](around:${r12},${lat},${lng});
+    nwr["historic"](around:${r12},${lat},${lng});
+    nwr["shop"~"^(mall|department_store|marketplace)$"](around:${r8},${lat},${lng});
+    nwr["route"~"^(hiking|bicycle|mtb)$"](around:${r25},${lat},${lng});
+    nwr["sport"~"^(climbing|scuba_diving|surfing|kitesurfing|canoeing|kayaking|rafting|paragliding)$"](around:${r25},${lat},${lng});
+    nwr["tourism"~"^(hotel|hostel|guest_house|motel|apartment|chalet|resort)$"](around:${r25},${lat},${lng});
+    nwr["shop"="travel_agency"](around:${r12},${lat},${lng});
+    nwr["amenity"="tour_guide"](around:${r12},${lat},${lng});
+  );out center tags 700;`;
+
+  const elements=await runOverpass(query,signal);
+  const seen=new Set(),out=[];
+  for(const el of elements){
+    const tags=el.tags??{};
+    // Prefer English name; keep local name as subtitle when it differs
+    const nameLocal=tags.name||null;
+    const nameEn=tags["name:en"]||tags["name:en-US"]||null;
+    const name=nameEn||nameLocal; if(!name) continue;
+    const nameLocalDiff=(nameLocal&&nameLocal!==name)?nameLocal:null;
+    const elat=el.lat??el.center?.lat,elng=el.lon??el.center?.lon;
+    if(elat==null||elng==null) continue;
+    const cat=classifyTags(tags); if(!cat) continue;
+    const km=haversineKm(origin,{lat:elat,lng:elng});
+    const k=`${name.toLowerCase()}|${elat.toFixed(4)}|${elng.toFixed(4)}`;
+    if(seen.has(k)) continue; seen.add(k);
+    out.push({id:`${el.type[0]}${el.id}`,name,nameLocal:nameLocalDiff,category:cat,subtype:subtypeOf(tags),lat:elat,lng:elng,distance_km:km,band:bandFor(km),effort:effortFor(km),tags});
+  }
+
+  if(out.length<8&&!signal?.aborted){
+    for(const p of await fetchWikipediaPOIs(origin,radiusM,signal)){
+      const k=`${p.name.toLowerCase()}|${p.lat.toFixed(4)}|${p.lng.toFixed(4)}`;
+      if(!seen.has(k)){seen.add(k);out.push(p);}
+    }
+  }
+  const counts=new Map();
+  for(const p of out) counts.set(p.category,(counts.get(p.category)??0)+1);
+  const thin=ALL_CATS.filter(c=>(counts.get(c)??0)<3);
+  if(thin.length&&!signal?.aborted){
+    for(const p of await fetchNominatimFallback(origin,radiusM,thin,signal)){
+      const k=`${p.name.toLowerCase()}|${p.lat.toFixed(4)}|${p.lng.toFixed(4)}`;
+      if(!seen.has(k)){seen.add(k);out.push(p);}
+    }
+  }
+  out.sort((a,b)=>a.distance_km-b.distance_km);
+  if(out.length>0) _poiCache.set(ck,{ts:Date.now(),pois:out});
+  return out;
+}
+
+// ═══════════════════════════════════════════════════
+//  GEOCODING
+// ═══════════════════════════════════════════════════
+async function searchPlaces(q) {
+  if(q.trim().length<2) return [];
+  const blocked=new Set(["road","highway","footway","path","residential","house","building"]);
+  try {
+    const res=await fetch(`https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(q)}&format=json&addressdetails=1&limit=7&accept-language=en`,{headers:{Accept:"application/json"}});
+    if(!res.ok) return [];
+    const rows=await res.json();
+    const seen=new Set(),out=[];
+    for(const r of rows){
+      const t=r.addresstype||r.type;
+      if(blocked.has(t)||!r.address?.country) continue;
+      const name=r.name||r.address.city||r.address.town||r.address.village||r.address.municipality||r.address.county||r.address.state||r.display_name.split(",")[0];
+      const key=`${name}|${r.address.country}`; if(seen.has(key)) continue; seen.add(key);
+      const lat=parseFloat(r.lat),lng=parseFloat(r.lon); if(!isFinite(lat)||!isFinite(lng)) continue;
+      out.push({name,country:r.address.country,cc:(r.address.country_code||"??").toUpperCase(),lat,lng,type:t,raw:r.display_name});
+    }
+    return out;
+  } catch { return []; }
+}
+const zoomFor=t=>/country/.test(t)?5:/state|region|province/.test(t)?7:/county|island/.test(t)?9:/city|town/.test(t)?12:13;
+
+// ═══════════════════════════════════════════════════
+//  LEAFLET MAP — POI dots + numbered plan markers + route polyline
+// ═══════════════════════════════════════════════════
+function TravelMap({ center, zoom, poiMarkers=[], planRoute=[], planMarkers=[], onMarkerClick, highlightId=null }) {
+  const divRef  = useRef(null);
+  const mapRef  = useRef(null);
+  const mksRef  = useRef(new Map());   // id → leaflet marker (POI dots)
+  const planMksRef = useRef([]);       // ordered leaflet markers (plan)
+  const routeRef   = useRef(null);     // route polyline
+  const pinRef     = useRef(null);     // center pin
+  const prevKey    = useRef(null);
+
+  // Init
+  useEffect(() => {
+    if (mapRef.current) return;
+    const map = L.map(divRef.current, { center:[20,0], zoom:2, minZoom:2, maxZoom:19, zoomControl:false, attributionControl:false });
+    L.tileLayer("https://{s}.basemaps.cartocdn.com/light_nolabels/{z}/{x}/{y}{r}.png",{maxZoom:19}).addTo(map);
+    L.tileLayer("https://{s}.basemaps.cartocdn.com/light_only_labels/{z}/{x}/{y}{r}.png",{maxZoom:19,opacity:0.75}).addTo(map);
+    L.control.zoom({position:"topright"}).addTo(map);
+    mapRef.current = map;
+  }, []);
+
+  // Fly to center
+  useEffect(() => {
+    const map=mapRef.current; if(!map||!center) return;
+    const key=`${center.lat}|${center.lng}`; if(prevKey.current===key) return;
+    prevKey.current=key;
+    map.flyTo([center.lat,center.lng],zoom??12,{duration:1.8,easeLinearity:0.25});
+    if(pinRef.current) map.removeLayer(pinRef.current);
+    const icon=L.divIcon({className:"",html:`<div style="position:relative;width:18px;height:18px"><div style="position:absolute;inset:-8px;border-radius:999px;background:rgba(37,99,235,0.18);animation:ping 1.8s cubic-bezier(0,0,0.2,1) infinite"></div><div style="position:absolute;inset:0;border-radius:999px;background:#2563eb;border:3px solid white;box-shadow:0 3px 12px rgba(37,99,235,0.55)"></div></div>`,iconSize:[18,18],iconAnchor:[9,9]});
+    pinRef.current=L.marker([center.lat,center.lng],{icon,zIndexOffset:1000}).addTo(map);
+  }, [center?.lat,center?.lng,zoom]);
+
+  // POI dots (non-plan)
+  useEffect(() => {
+    const map=mapRef.current; if(!map) return;
+    const nextIds=new Set(poiMarkers.map(m=>m.id));
+    for(const[id,mk] of mksRef.current) { if(!nextIds.has(id)){map.removeLayer(mk);mksRef.current.delete(id);} }
+    for(const m of poiMarkers) {
+      if(mksRef.current.has(m.id)) continue;
+      const s=8;
+      const icon=L.divIcon({className:"",html:`<div style="width:${s}px;height:${s}px;border-radius:999px;background:${m.color};border:1.5px solid white;box-shadow:0 1px 4px rgba(0,0,0,0.22);cursor:pointer;opacity:0.85"></div>`,iconSize:[s,s],iconAnchor:[s/2,s/2]});
+      const mk=L.marker([m.lat,m.lng],{icon});
+      if(onMarkerClick) mk.on("click",()=>onMarkerClick(m.id));
+      mk.addTo(map); mksRef.current.set(m.id,mk);
+    }
+  },[poiMarkers,onMarkerClick]);
+
+  // Route polyline
+  useEffect(() => {
+    const map=mapRef.current; if(!map) return;
+    if(routeRef.current){map.removeLayer(routeRef.current);routeRef.current=null;}
+    if(planRoute.length<2) return;
+    routeRef.current=L.polyline(planRoute.map(p=>[p.lat,p.lng]),{
+      color:"#2563eb",weight:2.5,opacity:0.7,dashArray:"8 5",lineCap:"round",lineJoin:"round"
+    }).addTo(map);
+  },[planRoute]);
+
+  // Numbered plan markers (with name labels + highlight)
+  useEffect(() => {
+    const map=mapRef.current; if(!map) return;
+    planMksRef.current.forEach(mk=>map.removeLayer(mk));
+    planMksRef.current=[];
+    for(const m of planMarkers) {
+      const hi=m.id===highlightId;
+      const s=hi?32:26;
+      const bg=hi?"#2563eb":"#0f172a";
+      const icon=L.divIcon({
+        className:"",
+        html:`<div style="width:${s}px;height:${s}px;border-radius:999px;background:${bg};border:${hi?3:2.5}px solid white;display:flex;align-items:center;justify-content:center;color:white;font-size:${hi?13:10}px;font-weight:800;box-shadow:0 3px 14px rgba(15,23,42,${hi?0.6:0.45});font-family:Inter,sans-serif;cursor:pointer">${m.num}</div>`,
+        iconSize:[s,s],iconAnchor:[s/2,s/2]
+      });
+      const mk=L.marker([m.lat,m.lng],{icon,zIndexOffset:hi?1500:500});
+      if(m.name) mk.bindTooltip(m.name,{permanent:true,direction:"right",offset:[s/2+1,0],className:"pin-label"+(hi?" pin-label-hi":"")});
+      if(onMarkerClick) mk.on("click",()=>onMarkerClick(m.id));
+      mk.addTo(map); planMksRef.current.push(mk);
+    }
+  },[planMarkers,onMarkerClick,highlightId]);
+
+  return <div ref={divRef} style={{position:"absolute",inset:0}} />;
+}
+
+// ═══════════════════════════════════════════════════
+//  AUTH MODAL
+// ═══════════════════════════════════════════════════
+function AuthModal({ onClose, onSignedIn }) {
+  const [mode,setMode]=useState("signin");
+  const [email,setEmail]=useState(""),  [pass,setPass]=useState("");
+  const [loading,setLoading]=useState(false), [error,setError]=useState(null), [msg,setMsg]=useState(null);
+
+  async function submit(e) {
+    e.preventDefault();
+    if(!sb){setError("Supabase not configured — paste your URL and key at the top of this file.");return;}
+    setLoading(true);setError(null);setMsg(null);
+    try {
+      if(mode==="magic"){
+        const{error}=await sb.auth.signInWithOtp({email});
+        if(error) throw error; setMsg("Magic link sent — check your email!");
+      } else if(mode==="signin"){
+        const{data,error}=await sb.auth.signInWithPassword({email,password:pass});
+        if(error) throw error; onSignedIn(data.user);
+      } else {
+        const{error}=await sb.auth.signUp({email,password:pass});
+        if(error) throw error; setMsg("Account created! Confirm your email then sign in.");
+      }
+    } catch(err){setError(err.message||"Something went wrong");}
+    finally{setLoading(false);}
+  }
+
+  return (
+    <div onClick={e=>{if(e.target===e.currentTarget)onClose();}} style={{position:"fixed",inset:0,zIndex:200,background:"rgba(15,23,42,0.55)",backdropFilter:"blur(6px)",display:"flex",alignItems:"center",justifyContent:"center",padding:16}}>
+      <div style={{background:"white",borderRadius:22,padding:"28px 26px",width:"100%",maxWidth:390,boxShadow:"0 30px 80px rgba(15,23,42,0.28)",animation:"fadeIn 0.2s ease"}}>
+        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:20}}>
+          <h2 style={{fontSize:20,fontWeight:800}}>{mode==="signup"?"Create account":mode==="magic"?"Magic link":"Sign in"}</h2>
+          <button onClick={onClose} style={{background:"none",border:"none",fontSize:20,cursor:"pointer",color:"#94a3b8",lineHeight:1}}>✕</button>
+        </div>
+        {!sb&&<div style={{background:"#fef3c7",border:"1px solid #fde68a",borderRadius:12,padding:"10px 14px",fontSize:12,color:"#92400e",marginBottom:16,lineHeight:1.5}}>⚠️ Supabase not configured. Add your URL and key at the top of this file.</div>}
+        <div style={{display:"flex",gap:5,marginBottom:20,background:"#f1f5f9",borderRadius:12,padding:4}}>
+          {[["signin","Password"],["magic","Magic link"],["signup","Sign up"]].map(([m,lbl])=>(
+            <button key={m} onClick={()=>setMode(m)} style={{flex:1,padding:"6px 4px",border:"none",borderRadius:9,cursor:"pointer",fontSize:12,fontWeight:600,background:mode===m?"white":"transparent",color:mode===m?"#0f172a":"#64748b",boxShadow:mode===m?"0 1px 4px rgba(0,0,0,0.1)":"none"}}>{lbl}</button>
+          ))}
+        </div>
+        <form onSubmit={submit}>
+          <input type="email" value={email} onChange={e=>setEmail(e.target.value)} required placeholder="Email address" style={{width:"100%",padding:"10px 14px",border:"1px solid #e2e8f0",borderRadius:12,fontSize:14,outline:"none",marginBottom:10}}/>
+          {mode!=="magic"&&<input type="password" value={pass} onChange={e=>setPass(e.target.value)} required placeholder="Password" style={{width:"100%",padding:"10px 14px",border:"1px solid #e2e8f0",borderRadius:12,fontSize:14,outline:"none",marginBottom:14}}/>}
+          {error&&<p style={{color:"#ef4444",fontSize:12,marginBottom:10}}>{error}</p>}
+          {msg  &&<p style={{color:"#16a34a",fontSize:12,marginBottom:10}}>{msg}</p>}
+          <button type="submit" disabled={loading} style={{width:"100%",padding:"11px",background:"#2563eb",color:"white",border:"none",borderRadius:12,fontSize:14,fontWeight:700,cursor:"pointer",opacity:loading?0.7:1}}>
+            {loading?"⏳ …":mode==="signup"?"Create account":mode==="magic"?"Send magic link":"Sign in"}
+          </button>
+        </form>
+      </div>
+    </div>
+  );
+}
+
+// ═══════════════════════════════════════════════════
+//  SAVED TRIPS VIEW
+// ═══════════════════════════════════════════════════
+function TripsView({ trips, loading, onBack, onDelete, onLoad }) {
+  return (
+    <div style={{height:"100vh",overflowY:"auto",background:"#f8fafc",padding:"20px 16px 40px"}}>
+      <div style={{maxWidth:680,margin:"0 auto"}}>
+        <div style={{display:"flex",alignItems:"center",gap:12,marginBottom:28}}>
+          <button onClick={onBack} style={{background:"white",border:"1px solid #e2e8f0",borderRadius:12,padding:"8px 16px",cursor:"pointer",fontSize:13,fontWeight:500}}>← Back to map</button>
+          <h1 style={{fontSize:22,fontWeight:800}}>My trips</h1>
+        </div>
+        {loading&&<p style={{color:"#94a3b8",fontSize:13,textAlign:"center",paddingTop:40}}>Loading…</p>}
+        {!loading&&trips.length===0&&(
+          <div style={{textAlign:"center",paddingTop:60,color:"#94a3b8"}}>
+            <div style={{fontSize:52,marginBottom:14}}>🗺️</div>
+            <p style={{fontSize:14,marginBottom:16}}>No saved trips yet.</p>
+            <button onClick={onBack} style={{background:"#2563eb",color:"white",border:"none",borderRadius:12,padding:"10px 22px",fontSize:13,fontWeight:600,cursor:"pointer"}}>Start planning</button>
+          </div>
+        )}
+        <div style={{display:"flex",flexDirection:"column",gap:12}}>
+          {trips.map(trip=>(
+            <div key={trip.id} style={{background:"white",border:"1px solid #e2e8f0",borderRadius:18,padding:"16px 18px"}}>
+              <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",gap:12}}>
+                <div>
+                  <h3 style={{fontSize:16,fontWeight:700,marginBottom:4}}>{trip.name}</h3>
+                  <p style={{fontSize:11,color:"#94a3b8"}}>{(trip.plan??[]).length} stop{(trip.plan??[]).length!==1?"s":""} · {new Date(trip.saved_at).toLocaleDateString()}</p>
+                </div>
+                <div style={{display:"flex",gap:6,flexShrink:0}}>
+                  <button onClick={()=>onLoad(trip)} style={{background:"#eff6ff",color:"#2563eb",border:"1px solid #bfdbfe",borderRadius:9,padding:"5px 12px",fontSize:11,fontWeight:600,cursor:"pointer"}}>Load</button>
+                  <button onClick={()=>onDelete(trip.id)} style={{background:"none",color:"#ef4444",border:"1px solid #fee2e2",borderRadius:9,padding:"5px 10px",fontSize:11,cursor:"pointer"}}>Delete</button>
+                </div>
+              </div>
+              {(trip.plan??[]).length>0&&(
+                <div style={{marginTop:12,display:"flex",flexWrap:"wrap",gap:6}}>
+                  {trip.plan.map((p,i)=>(
+                    <span key={p.id} style={{background:"#f1f5f9",borderRadius:8,padding:"4px 10px",fontSize:12}}>
+                      {i+1}. {CAT_ICON[p.category]??""} {p.name}
+                    </span>
+                  ))}
+                </div>
+              )}
+            </div>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ═══════════════════════════════════════════════════
+//  TIMELINE VIEW (plan tab)
+// ═══════════════════════════════════════════════════
+function TimelineView({ timeline, planIds, onRemove, onMove, onFocus, onDragStart, onDragOver, onDragEnd, dragId, onSave, user }) {
+  if (!timeline.length) return (
+    <div style={{textAlign:"center",padding:"28px 0",color:"#94a3b8"}}>
+      <p style={{fontSize:13,marginBottom:10}}>Your plan is empty.</p>
+      <p style={{fontSize:11}}>Click <strong>+ Add</strong> on any place, or use <strong>✨ Generate plan</strong> above to create a smart day.</p>
+    </div>
+  );
+
+  // Total trip time
+  const totalMin = timeline.reduce((s,p)=>s+p.durMin+(p.leg?.minutes??0),0);
+  const startT   = timeline[0]?.startAt;
+  const endT     = timeline[timeline.length-1]?.endAt;
+
+  return (
+    <div>
+      {/* Header strip */}
+      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"8px 4px 12px"}}>
+        <div>
+          <span style={{fontSize:12,fontWeight:700,color:"#334155"}}>{timeline.length} stop{timeline.length!==1?"s":""}</span>
+          {startT&&<span style={{fontSize:11,color:"#94a3b8",marginLeft:8}}>
+            {formatTime(startT)} – {formatTime(endT)} · {formatDuration(totalMin)} total
+          </span>}
+        </div>
+        <div style={{display:"flex",gap:8}}>
+          <button onClick={onSave} style={{background:"#2563eb",color:"white",border:"none",borderRadius:9,padding:"6px 16px",fontSize:12,fontWeight:700,cursor:"pointer"}}>
+            💾 Save{!user&&" ✦"}
+          </button>
+        </div>
+      </div>
+
+      {/* Timeline list */}
+      <ol style={{margin:0,padding:0,listStyle:"none"}}>
+        {timeline.map((stop, i) => (
+          <li key={stop.id} className="tl-stop" style={{animationDelay:`${i*0.04}s`}}>
+            {/* Stop row */}
+            <div
+              draggable
+              onDragStart={()=>onDragStart(stop.id)}
+              onDragOver={e=>onDragOver(e,stop.id)}
+              onDragEnd={onDragEnd}
+              style={{display:"flex",gap:0,alignItems:"stretch",opacity:dragId===stop.id?0.45:1,cursor:"grab"}}
+            >
+              {/* Time column */}
+              <div style={{width:54,flexShrink:0,paddingTop:12,textAlign:"right",paddingRight:10}}>
+                <span style={{fontSize:12,fontWeight:700,color:"#334155",letterSpacing:"-0.3px"}}>{formatTime(stop.startAt)}</span>
+              </div>
+
+              {/* Number + vertical connector */}
+              <div style={{width:36,flexShrink:0,display:"flex",flexDirection:"column",alignItems:"center",paddingTop:8}}>
+                <div style={{width:26,height:26,borderRadius:999,background:"#0f172a",display:"flex",alignItems:"center",justifyContent:"center",color:"white",fontSize:10,fontWeight:800,flexShrink:0,boxShadow:"0 2px 8px rgba(15,23,42,0.3)"}}>
+                  {i+1}
+                </div>
+                {i<timeline.length-1&&<div style={{flex:1,width:2,background:"#e2e8f0",marginTop:4,minHeight:24}} />}
+              </div>
+
+              {/* Card */}
+              <div style={{flex:1,minWidth:0,paddingBottom:stop.leg?0:8,paddingLeft:8,paddingTop:6}}>
+                <div style={{background:"white",border:"1px solid #e2e8f0",borderRadius:14,padding:"10px 12px",display:"flex",gap:10,alignItems:"center"}}>
+                  {/* Icon */}
+                  <button onClick={()=>onFocus(stop)} style={{width:38,height:38,borderRadius:10,background:"#f8fafc",border:"1px solid #e2e8f0",display:"flex",alignItems:"center",justifyContent:"center",fontSize:18,cursor:"pointer",flexShrink:0}}>
+                    {CAT_ICON[stop.category]}
+                  </button>
+                  {/* Text */}
+                  <div style={{flex:1,minWidth:0}}>
+                    <button onClick={()=>onFocus(stop)} style={{background:"none",border:"none",cursor:"pointer",padding:0,fontWeight:700,fontSize:13,textAlign:"left",width:"100%",overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",color:"#0f172a"}}>
+                      {stop.name}
+                    </button>
+                    <div style={{display:"flex",alignItems:"center",gap:8,marginTop:2,flexWrap:"wrap"}}>
+                      <span style={{fontSize:11,color:"#64748b",fontWeight:500}}>{stop.actLabel}</span>
+                      <span style={{fontSize:10,color:"#94a3b8"}}>·</span>
+                      <span style={{fontSize:11,color:"#94a3b8"}}>{formatDuration(stop.durMin)}</span>
+                      <span style={{fontSize:10,color:"#94a3b8"}}>·</span>
+                      <span style={{fontSize:11,color:"#94a3b8"}}>{formatDist(stop.distance_km)}</span>
+                    </div>
+                    <div style={{fontSize:10,color:"#94a3b8",marginTop:2}}>
+                      {formatTime(stop.startAt)} – {formatTime(stop.endAt)}
+                    </div>
+                  </div>
+                  {/* Controls */}
+                  <div style={{display:"flex",gap:3,flexShrink:0}}>
+                    <span style={{color:"#cbd5e1",fontSize:11,cursor:"grab",userSelect:"none",padding:"0 2px"}}>⋮⋮</span>
+                    <button onClick={()=>onMove(stop.id,-1)} disabled={i===0} style={{border:"1px solid #e2e8f0",background:"none",borderRadius:7,padding:"2px 6px",cursor:"pointer",fontSize:11,opacity:i===0?0.25:1}}>↑</button>
+                    <button onClick={()=>onMove(stop.id,1)} disabled={i===timeline.length-1} style={{border:"1px solid #e2e8f0",background:"none",borderRadius:7,padding:"2px 6px",cursor:"pointer",fontSize:11,opacity:i===timeline.length-1?0.25:1}}>↓</button>
+                    <button onClick={()=>onRemove(stop.id)} style={{border:"1px solid #fee2e2",background:"none",borderRadius:7,padding:"2px 6px",cursor:"pointer",fontSize:11,color:"#ef4444"}}>✕</button>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            {/* Travel leg */}
+            {stop.leg&&(
+              <div style={{display:"flex",gap:0}}>
+                <div style={{width:54,flexShrink:0}} />
+                <div style={{width:36,flexShrink:0,display:"flex",justifyContent:"center"}}>
+                  <div style={{width:2,background:"#e2e8f0"}} />
+                </div>
+                <div style={{flex:1,paddingLeft:8,paddingTop:3,paddingBottom:3}}>
+                  <div style={{display:"inline-flex",alignItems:"center",gap:6,background:"#f8fafc",borderRadius:8,padding:"4px 10px",border:"1px solid #e2e8f0"}}>
+                    <span style={{fontSize:13}}>{stop.leg.mode==="walk"?"🚶":"🚕"}</span>
+                    <span style={{fontSize:11,color:"#64748b",fontWeight:500}}>{stop.leg.minutes} min {stop.leg.mode}</span>
+                    <span style={{fontSize:10,color:"#94a3b8"}}>· {formatDist(stop.leg.km)}</span>
+                  </div>
+                </div>
+              </div>
+            )}
+          </li>
+        ))}
+      </ol>
+
+      <p style={{textAlign:"center",fontSize:10,color:"#cbd5e1",marginTop:14}}>Drag stops to reorder · distances are straight-line</p>
+    </div>
+  );
+}
+
+// ═══════════════════════════════════════════════════
+//  ITINERARY BUCKETS — the global drag-and-drop list
+//  (category buckets in selection order, GLOBAL #1..#N numbering)
+// ═══════════════════════════════════════════════════
+function ItineraryBuckets({ groups, total, dragId, highlightId, onDragStart, onDragOver, onDragEnd, onRemove, onClickItem, itemRefs }) {
+  return (
+    <div>
+      <div style={{padding:"2px 4px 10px"}}>
+        <span style={{fontSize:11,fontWeight:700,color:"#64748b",textTransform:"uppercase",letterSpacing:"0.08em"}}>🧭 Your itinerary · {total} stop{total!==1?"s":""}</span>
+        <p style={{fontSize:11,color:"#94a3b8",margin:"4px 0 0",lineHeight:1.4}}>Drag any place to reorder — the numbers are your travel flow across <em>all</em> categories, and the map updates live.</p>
+      </div>
+      {groups.map((g,gi)=>(
+        <section key={gi} style={{marginBottom:14}}>
+          {/* Category bucket header */}
+          <div style={{display:"flex",alignItems:"center",gap:6,padding:"0 2px",marginBottom:6}}>
+            <span style={{fontSize:14}}>{CAT_ICON[g.cat]}</span>
+            <h3 style={{margin:0,fontSize:12,fontWeight:700,color:"#0f172a"}}>{CAT_LABEL[g.cat]}</h3>
+            <span style={{fontSize:10,color:"#94a3b8",background:"#f1f5f9",borderRadius:6,padding:"1px 7px",fontWeight:600}}>{g.items.length}</span>
+          </div>
+          <ul style={{margin:0,padding:0,listStyle:"none",display:"flex",flexDirection:"column",gap:5}}>
+            {g.items.map(p=>{
+              const hi=highlightId===p.id;
+              return (
+                <li key={p.id} ref={el=>{ if(el) itemRefs.current.set(p.id,el); else itemRefs.current.delete(p.id); }}>
+                  <div draggable
+                    onDragStart={()=>onDragStart(p.id)}
+                    onDragOver={e=>onDragOver(e,p.id)}
+                    onDragEnd={onDragEnd}
+                    onClick={()=>onClickItem(p)}
+                    className="poi-card"
+                    style={{display:"flex",alignItems:"center",gap:9,background:hi?"#dbeafe":"white",border:`1px solid ${hi?"#2563eb":"#e2e8f0"}`,borderRadius:12,padding:"8px 10px",cursor:"grab",opacity:dragId===p.id?0.4:1,boxShadow:hi?"0 0 0 2px rgba(37,99,235,0.18)":"none"}}>
+                    {/* Global number */}
+                    <div style={{width:28,height:28,borderRadius:999,background:hi?"#2563eb":"#0f172a",color:"white",display:"flex",alignItems:"center",justifyContent:"center",fontSize:11,fontWeight:800,flexShrink:0,boxShadow:"0 2px 8px rgba(15,23,42,0.3)"}}>{p._num}</div>
+                    {/* Name + meta */}
+                    <div style={{flex:1,minWidth:0}}>
+                      <div style={{fontWeight:600,fontSize:13,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",color:"#0f172a"}}>{p.name}</div>
+                      <div style={{display:"flex",alignItems:"center",gap:5,marginTop:2}}>
+                        <span style={{display:"inline-block",width:6,height:6,borderRadius:999,background:BAND_COLOR[p.band]}}/>
+                        <span style={{fontSize:10,color:"#94a3b8"}}>{p.distance_km<1?`${Math.round(p.distance_km*1000)}m`:p.distance_km.toFixed(1)+"km"}</span>
+                        <span style={{fontSize:10,color:"#cbd5e1"}}>·</span>
+                        <span style={{fontSize:10,color:"#94a3b8"}}>{CAT_LABEL[p.category]}</span>
+                      </div>
+                    </div>
+                    <span style={{color:"#cbd5e1",fontSize:12,userSelect:"none",cursor:"grab"}}>⋮⋮</span>
+                    <button onClick={e=>{e.stopPropagation();onRemove(p.id);}} title="Remove from itinerary" style={{border:"1px solid #fee2e2",background:"none",borderRadius:7,padding:"3px 7px",cursor:"pointer",fontSize:11,color:"#ef4444",flexShrink:0}}>✕</button>
+                  </div>
+                </li>
+              );
+            })}
+          </ul>
+        </section>
+      ))}
+    </div>
+  );
+}
+
+// ═══════════════════════════════════════════════════
+//  MAIN APP
+// ═══════════════════════════════════════════════════
+function App() {
+  // Auth
+  const [user,setUser]=useState(null), [showAuth,setShowAuth]=useState(false), [pending,setPending]=useState(null);
+
+  // View
+  const [view,setView]=useState("map");
+
+  // Origin
+  const [destination,setDestination]=useState(null), [gpsCoords,setGpsCoords]=useState(null);
+  const [gpsLoading,setGpsLoading]=useState(false),   [gpsError,setGpsError]=useState(null);
+
+  // Search
+  const [q,setQ]=useState(""), [opts,setOpts]=useState([]), [searching,setSearching]=useState(false), [dropOpen,setDropOpen]=useState(false);
+  const reqRef=useRef(0);
+
+  // POIs
+  const [pois,setPois]=useState([]), [poisLoading,setPoisLoading]=useState(false), [poisError,setPoisError]=useState(null);
+
+  // On-demand name translations: Map<id, {text:string|null, loading:bool}>
+  const [translations,setTranslations]=useState(new Map());
+  async function translateName(p){
+    if(translations.has(p.id)) return;
+    setTranslations(m=>new Map(m).set(p.id,{text:null,loading:true}));
+    try{
+      const res=await fetch(`https://api.mymemory.translated.net/get?q=${encodeURIComponent(p.nameLocal)}&langpair=auto|en`);
+      const d=await res.json();
+      const t=d?.responseData?.translatedText;
+      // Only store if the translation actually differs from the local name
+      setTranslations(m=>new Map(m).set(p.id,{text:(t&&t.toLowerCase()!==p.nameLocal?.toLowerCase())?t:null,loading:false}));
+    }catch{
+      setTranslations(m=>new Map(m).set(p.id,{text:null,loading:false}));
+    }
+  }
+
+  // Filters — catOrder preserves the order categories were selected in
+  const [catOrder,setCatOrder]=useState([]); // start empty — user picks categories first
+  const selCats=useMemo(()=>new Set(catOrder),[catOrder]);
+  const [distBand,setDistBand]=useState("all");
+  const [perCat,setPerCat]=useState(8);
+
+  // Plan
+  const [plan,setPlan]=useState([]);
+  const [dragId,setDragId]=useState(null);
+  const [highlightId,setHighlightId]=useState(null); // synced highlight between list & map
+  const itemRefs=useRef(new Map());                  // id → list <li> (for scroll-into-view)
+  const [mapFocus,setMapFocus]=useState(null);
+  const [sheetTab,setSheetTab]=useState("places"); // "places" | "plan"
+  const [editingPosId,setEditingPosId]=useState(null);
+  const [sheetOpen,setSheetOpen]=useState(true);
+
+  // Plan start time (defaults to now, user can adjust)
+  const [planStartStr,setPlanStartStr]=useState(()=>{
+    const n=new Date(); n.setSeconds(0,0);
+    return `${String(n.getHours()).padStart(2,"0")}:${String(n.getMinutes()).padStart(2,"0")}`;
+  });
+
+  // Saved trips
+  const [trips,setTrips]=useState([]), [tripsLoading,setTripsLoading]=useState(false);
+
+  const origin=destination?{lat:destination.lat,lng:destination.lng}:gpsCoords;
+
+  // Build timeline from plan
+  const timeline = useMemo(()=>{
+    if(!plan.length) return [];
+    const [hh,mm]=planStartStr.split(":").map(Number);
+    const start=new Date(); start.setHours(hh,mm,0,0);
+    return buildTimeline(plan,start);
+  },[plan,planStartStr]);
+
+  // Route for map (plan coords in order)
+  const planRoute = useMemo(()=>plan.map(p=>({lat:p.lat,lng:p.lng})),[plan]);
+  const planMarkers = useMemo(()=>plan.map((p,i)=>({id:p.id,lat:p.lat,lng:p.lng,num:i+1,name:`${i+1}. ${p.name}`})),[plan]);
+  const planIds = useMemo(()=>new Set(plan.map(p=>p.id)),[plan]);
+
+  // Itinerary grouped into category buckets (contiguous runs) with GLOBAL numbering.
+  // The flat `plan` array is the single source of truth; numbers = global index+1.
+  const itinGroups = useMemo(()=>{
+    const groups=[]; let cur=null;
+    plan.forEach((p,i)=>{
+      if(!cur||cur.cat!==p.category){ cur={cat:p.category,items:[]}; groups.push(cur); }
+      cur.items.push({...p,_num:i+1});
+    });
+    return groups;
+  },[plan]);
+
+  // Scroll the highlighted list item into view (e.g. after clicking a map pin)
+  useEffect(()=>{
+    if(!highlightId) return;
+    const el=itemRefs.current.get(highlightId);
+    if(el) el.scrollIntoView({behavior:"smooth",block:"nearest"});
+  },[highlightId]);
+
+  // Auth
+  useEffect(()=>{
+    if(!sb) return;
+    sb.auth.getUser().then(({data})=>setUser(data?.user??null));
+    const{data:{subscription}}=sb.auth.onAuthStateChange((_,s)=>setUser(s?.user??null));
+    return()=>subscription.unsubscribe();
+  },[]);
+
+  // Search debounce
+  useEffect(()=>{
+    if(!dropOpen||q.trim().length<2){setOpts([]);return;}
+    const id=++reqRef.current; setSearching(true);
+    const t=setTimeout(()=>{ searchPlaces(q).then(r=>{if(id===reqRef.current)setOpts(r);}).finally(()=>{if(id===reqRef.current)setSearching(false);}); },380);
+    return()=>clearTimeout(t);
+  },[q,dropOpen]);
+
+  // Fetch POIs
+  useEffect(()=>{
+    if(!origin){setPois([]);return;}
+    let cancelled=false; const ac=new AbortController();
+    setPoisError(null);setPoisLoading(true);
+    const t=setTimeout(()=>{
+      fetchNearbyPOIs(origin,25_000,ac.signal)
+        .then(r=>{if(!cancelled)setPois(Array.isArray(r)?r:[]);})
+        .catch(()=>{if(!cancelled){setPois([]);setPoisError("Places took too long — try again in a moment.");}})
+        .finally(()=>{if(!cancelled)setPoisLoading(false);});
+    },300);
+    return()=>{cancelled=true;ac.abort();clearTimeout(t);};
+  },[origin?.lat,origin?.lng]);
+
+  // Filter POIs
+  const filtered = useMemo(()=>{
+    const inBand=p=>distBand==="all"?true:distBand==="very_close"?p.distance_km<0.5:distBand==="nearby"?p.distance_km<2:distBand==="short_drive"?p.distance_km<10:true;
+    const buckets=new Map();
+    for(const p of pois){ if(!selCats.has(p.category)||!inBand(p)) continue; const a=buckets.get(p.category)??[];a.push(p);buckets.set(p.category,a); }
+    const out=[];
+    for(const[,a] of buckets){a.sort((x,y)=>x.distance_km-y.distance_km);out.push(...a.slice(0,perCat));}
+    return out.sort((a,b)=>a.distance_km-b.distance_km);
+  },[pois,selCats,distBand,perCat]);
+
+  // Group by category in the order the user SELECTED them, sorted closest-first within each
+  const groupedByCat=useMemo(()=>{
+    const g=new Map();
+    for(const cat of catOrder){ g.set(cat,[]); }
+    for(const p of filtered){ const arr=g.get(p.category); if(arr) arr.push(p); }
+    // each bucket is already distance-sorted because `filtered` is sorted
+    return g;
+  },[filtered,catOrder]);
+
+  // POI markers (exclude plan stops — those get numbered markers)
+  const poiMarkers = useMemo(()=>
+    filtered.filter(p=>!planIds.has(p.id)).slice(0,120).map(p=>({
+      id:p.id,lat:p.lat,lng:p.lng,color:BAND_COLOR[p.band]
+    })),
+    [filtered,planIds]
+  );
+
+  const mapCenter = mapFocus??(destination?{lat:destination.lat,lng:destination.lng}:gpsCoords??null);
+  const mapZoom   = mapFocus?.zoom??(destination?zoomFor(destination.type):gpsCoords?14:2);
+
+  // Handlers
+  function pickDest(s){setDestination(s);setGpsCoords(null);setQ(`${s.name}, ${s.country}`);setDropOpen(false);setSheetOpen(true);setSheetTab("places");}
+  function clearOrigin(){setDestination(null);setGpsCoords(null);setQ("");setPois([]);setPlan([]);setMapFocus(null);setHighlightId(null);}
+
+  async function useMyLocation(){
+    setGpsError(null);setGpsLoading(true);
+    try{
+      const pos=await new Promise((r,e)=>navigator.geolocation.getCurrentPosition(r,e,{enableHighAccuracy:true,timeout:10_000}));
+      setGpsCoords({lat:pos.coords.latitude,lng:pos.coords.longitude});
+      setDestination(null);setQ("");setSheetOpen(true);setSheetTab("places");
+    }catch{setGpsError("Location access denied. Search a destination instead.");}
+    finally{setGpsLoading(false);}
+  }
+
+  function toggleCat(c){setCatOrder(o=>o.includes(c)?o.filter(x=>x!==c):[...o,c]);}
+  function addToPlan(p){setPlan(cur=>cur.some(x=>x.id===p.id)?cur:[...cur,p]);setMapFocus({lat:p.lat,lng:p.lng,zoom:16});}
+  function removeFromPlan(id){setPlan(cur=>cur.filter(p=>p.id!==id));setEditingPosId(null);if(highlightId===id)setHighlightId(null);}
+  // Click a list item → highlight it on the map (and focus there)
+  function focusItem(p){setHighlightId(p.id);setMapFocus({lat:p.lat,lng:p.lng,zoom:16});}
+  function moveToPlanPos(id,newPos){
+    setPlan(cur=>{
+      const old=cur.findIndex(p=>p.id===id); if(old===-1) return cur;
+      const n=[...cur]; const[item]=n.splice(old,1); n.splice(newPos,0,item); return n;
+    });
+  }
+  function movePlan(id,d){
+    setPlan(cur=>{
+      const i=cur.findIndex(p=>p.id===id),j=i+d;
+      if(i===-1||j<0||j>=cur.length) return cur;
+      const n=[...cur];[n[i],n[j]]=[n[j],n[i]];return n;
+    });
+  }
+  function onDragStart(id){setDragId(id);}
+  function onDragOver(e,overId){
+    e.preventDefault();
+    if(!dragId||dragId===overId) return;
+    setPlan(cur=>{
+      const from=cur.findIndex(p=>p.id===dragId),to=cur.findIndex(p=>p.id===overId);
+      if(from===-1||to===-1) return cur;
+      const n=[...cur];const[m]=n.splice(from,1);n.splice(to,0,m);return n;
+    });
+  }
+
+  function doGeneratePlan(){
+    if(!filtered.length) return;
+    // Build ONE global itinerary: category buckets in SELECTION order,
+    // closest-first within each bucket. Numbering stays global (#1..#N).
+    const built=[];
+    for(const cat of catOrder){
+      if(CAT_PLAN_EXCLUDE.has(cat)) continue;          // hotels stay browse-only
+      const items=filtered.filter(p=>p.category===cat) // already distance-sorted
+                          .sort((a,b)=>a.distance_km-b.distance_km);
+      built.push(...items);
+    }
+    if(!built.length) return;
+    setPlan(built); setSheetOpen(true); setSheetTab("plan");
+    setHighlightId(null);
+    setMapFocus({lat:built[0].lat,lng:built[0].lng,zoom:13});
+    // Fit map to the whole route
+    if(built.length>1){
+      const map=document.querySelector(".leaflet-container")?._leaflet_map;
+      if(map){
+        try{ map.fitBounds(built.map(p=>[p.lat,p.lng]),{padding:[70,70]}); }catch{}
+      }
+    }
+  }
+
+  async function loadTrips(){
+    if(!sb||!user){setTrips([]);return;}
+    setTripsLoading(true);
+    const{data,error}=await sb.from("trips").select("*").order("saved_at",{ascending:false});
+    setTrips(!error&&Array.isArray(data)?data:[]);
+    setTripsLoading(false);
+  }
+
+  async function saveTrip(){
+    if(!sb){alert("Supabase not configured. Add your URL and key at the top of the file.");return;}
+    if(!user){setPending("save");setShowAuth(true);return;}
+    const name=destination?.name??`My location ${new Date().toLocaleDateString()}`;
+    const{error}=await sb.from("trips").insert({
+      user_id:user.id,name,
+      origin:destination?{kind:"destination",...destination}:{kind:"gps",...gpsCoords},
+      plan:plan.map(p=>({id:p.id,name:p.name,category:p.category,subtype:p.subtype,lat:p.lat,lng:p.lng})),
+      saved_at:new Date().toISOString(),
+    });
+    if(error){alert("Save failed: "+error.message);return;}
+    alert(`"${name}" saved — ${plan.length} stop${plan.length!==1?"s":""}!`);
+  }
+
+  async function deleteTrip(id){if(!sb)return;await sb.from("trips").delete().eq("id",id);setTrips(t=>t.filter(x=>x.id!==id));}
+
+  function loadTripOnMap(trip){
+    if(trip.origin?.lat){
+      if(trip.origin.kind==="gps"){setGpsCoords({lat:trip.origin.lat,lng:trip.origin.lng});setDestination(null);setQ("");}
+      else{setDestination(trip.origin);setQ(`${trip.origin.name}, ${trip.origin.country}`);setGpsCoords(null);}
+    }
+    setPlan(trip.plan??[]);setView("map");setSheetOpen(true);setSheetTab("plan");
+    if(trip.plan?.[0]) setMapFocus({lat:trip.plan[0].lat,lng:trip.plan[0].lng,zoom:13});
+  }
+
+  async function signOut(){if(sb)await sb.auth.signOut();setUser(null);}
+
+  function onSignedIn(u){
+    setUser(u);setShowAuth(false);
+    if(pending==="save"){setPending(null);setTimeout(saveTrip,100);}
+    else setPending(null);
+  }
+
+  const originLabel=destination?`${destination.name}, ${destination.country}`:gpsCoords?`📍 ${gpsCoords.lat.toFixed(4)}, ${gpsCoords.lng.toFixed(4)}`:null;
+
+  // ── Trips view ──
+  if(view==="trips") return (
+    <>
+      {showAuth&&<AuthModal onClose={()=>setShowAuth(false)} onSignedIn={onSignedIn}/>}
+      <TripsView trips={trips} loading={tripsLoading} onBack={()=>setView("map")} onDelete={deleteTrip} onLoad={loadTripOnMap}/>
+    </>
+  );
+
+  // ── Map view ──
+  return (
+    <div style={{position:"relative",height:"100vh",width:"100vw",overflow:"hidden",color:"#0f172a"}}>
+      {showAuth&&<AuthModal onClose={()=>setShowAuth(false)} onSignedIn={onSignedIn}/>}
+
+      {/* Map */}
+      <div style={{position:"absolute",inset:0,zIndex:0}}>
+        <TravelMap
+          center={mapCenter} zoom={mapZoom}
+          poiMarkers={poiMarkers}
+          planRoute={planRoute}
+          planMarkers={planMarkers}
+          highlightId={highlightId}
+          onMarkerClick={id=>{
+            const p=plan.find(x=>x.id===id)??filtered.find(x=>x.id===id);
+            if(!p) return;
+            // Clicking a map pin highlights the matching list item (and scrolls to it)
+            setHighlightId(id);
+            setMapFocus({lat:p.lat,lng:p.lng,zoom:16});
+            if(!sheetOpen) setSheetOpen(true);
+          }}
+        />
+        <div style={{position:"absolute",inset:0,pointerEvents:"none",background:"linear-gradient(to bottom,rgba(248,250,252,0.42) 0%,transparent 44%,rgba(248,250,252,0.22) 100%)"}}/>
+      </div>
+
+      {/* ── Header ── */}
+      <header style={{position:"absolute",top:0,left:0,right:0,zIndex:40,padding:"12px 16px"}}>
+        <div style={{maxWidth:1400,margin:"0 auto",display:"flex",alignItems:"center",justifyContent:"space-between"}}>
+          <div style={{display:"flex",alignItems:"center",gap:8,background:"rgba(255,255,255,0.92)",backdropFilter:"blur(14px)",borderRadius:999,padding:"6px 14px",border:"1px solid rgba(0,0,0,0.07)",boxShadow:"0 2px 10px rgba(0,0,0,0.06)"}}>
+            <span style={{fontWeight:800,fontSize:15,letterSpacing:"-0.3px"}}>TravelFlow</span>
+            <span style={{fontSize:9,fontWeight:700,letterSpacing:"0.12em",textTransform:"uppercase",background:"#dbeafe",color:"#1d4ed8",padding:"2px 7px",borderRadius:999}}>AI</span>
+          </div>
+          <div style={{display:"flex",gap:8,alignItems:"center"}}>
+            {user?(
+              <>
+                <button onClick={()=>{setView("trips");loadTrips();}} style={{background:"rgba(255,255,255,0.92)",backdropFilter:"blur(12px)",border:"1px solid rgba(0,0,0,0.07)",borderRadius:999,padding:"6px 14px",fontSize:12,fontWeight:500,cursor:"pointer"}}>💾 My trips</button>
+                <span style={{fontSize:11,color:"#64748b",background:"rgba(255,255,255,0.88)",backdropFilter:"blur(8px)",padding:"5px 10px",borderRadius:999,border:"1px solid rgba(0,0,0,0.07)"}}>{user.email}</span>
+                <button onClick={signOut} style={{background:"rgba(255,255,255,0.88)",backdropFilter:"blur(8px)",border:"1px solid rgba(0,0,0,0.07)",borderRadius:999,padding:"6px 12px",fontSize:11,fontWeight:500,cursor:"pointer"}}>Sign out</button>
+              </>
+            ):(
+              <button onClick={()=>setShowAuth(true)} style={{background:"#0f172a",color:"white",border:"none",borderRadius:999,padding:"7px 18px",fontSize:12,fontWeight:700,cursor:"pointer",letterSpacing:"0.04em"}}>Sign in to save trips</button>
+            )}
+          </div>
+        </div>
+      </header>
+
+      {/* ── Search ── */}
+      <div style={{position:"absolute",top:60,left:0,right:0,zIndex:40,padding:"0 12px"}}>
+        <div style={{maxWidth:540,margin:"0 auto"}}>
+          <div style={{background:"rgba(255,255,255,0.97)",backdropFilter:"blur(20px)",borderRadius:20,padding:"10px 12px",boxShadow:"0 20px 60px -20px rgba(15,23,42,0.26)",border:"1px solid rgba(0,0,0,0.07)"}}>
+            <div style={{display:"flex",alignItems:"center",gap:8}}>
+              <div style={{width:36,height:36,borderRadius:12,background:"#eff6ff",display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0,fontSize:16}}>🔍</div>
+              <input value={q} onChange={e=>{setQ(e.target.value);setDropOpen(true);if(destination)setDestination(null);}}
+                onFocus={()=>setDropOpen(true)} onBlur={()=>setTimeout(()=>setDropOpen(false),220)}
+                placeholder="Search a destination — Paris, Tokyo, Athens…" autoComplete="off"
+                style={{flex:1,background:"none",border:"none",outline:"none",fontSize:14,minWidth:0,color:"#0f172a"}}/>
+              <button onClick={useMyLocation} disabled={gpsLoading} style={{background:"#2563eb",color:"white",border:"none",borderRadius:12,padding:"7px 14px",fontSize:12,fontWeight:700,cursor:"pointer",flexShrink:0,opacity:gpsLoading?0.7:1}}>
+                📍 {gpsLoading?"…":"Near me"}
+              </button>
+              {originLabel&&<button onClick={clearOrigin} style={{background:"none",border:"none",cursor:"pointer",fontSize:15,color:"#94a3b8",padding:"4px 6px",lineHeight:1}}>✕</button>}
+            </div>
+            {dropOpen&&q.trim().length>=2&&(
+              <div style={{marginTop:8,borderRadius:14,border:"1px solid #f1f5f9",background:"white",overflow:"hidden",boxShadow:"0 8px 24px rgba(0,0,0,0.07)"}}>
+                {searching&&<div style={{padding:"10px 14px",fontSize:12,color:"#94a3b8"}}>Searching…</div>}
+                {!searching&&opts.length===0&&<div style={{padding:"10px 14px",fontSize:12,color:"#94a3b8"}}>No results — try adding the country, e.g. "Guanacaste, Costa Rica"</div>}
+                {opts.map((s,i)=>(
+                  <button key={i} onMouseDown={e=>{e.preventDefault();pickDest(s);}}
+                    style={{width:"100%",textAlign:"left",padding:"10px 14px",border:"none",background:"none",cursor:"pointer",display:"block",borderBottom:i<opts.length-1?"1px solid #f8fafc":"none"}}
+                    onMouseEnter={e=>e.currentTarget.style.background="#f8fafc"} onMouseLeave={e=>e.currentTarget.style.background="none"}>
+                    <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",gap:8}}>
+                      <span style={{fontWeight:600,fontSize:13}}>{s.name}</span>
+                      <span style={{fontSize:10,color:"#94a3b8",fontWeight:700,letterSpacing:"0.1em"}}>{s.cc}</span>
+                    </div>
+                    <div style={{fontSize:11,color:"#94a3b8",marginTop:1,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{s.raw}</div>
+                  </button>
+                ))}
+              </div>
+            )}
+            {gpsError&&<p style={{color:"#ef4444",fontSize:11,marginTop:8,paddingLeft:4}}>{gpsError}</p>}
+          </div>
+          {!origin&&(
+            <div style={{marginTop:8,display:"flex",flexWrap:"wrap",gap:6,justifyContent:"center"}}>
+              {QUICK.map(d=>(
+                <button key={d.label} onClick={()=>pickDest({name:d.label,country:d.country,cc:d.cc,lat:d.lat,lng:d.lng,type:d.type})}
+                  style={{background:"rgba(255,255,255,0.9)",backdropFilter:"blur(8px)",border:"1px solid rgba(0,0,0,0.09)",borderRadius:999,padding:"5px 13px",fontSize:11,fontWeight:500,cursor:"pointer"}}>
+                  {d.label}
+                </button>
+              ))}
+            </div>
+          )}
+        </div>
+      </div>
+
+      {/* ── Filter strip ── */}
+      {origin&&(
+        <div style={{position:"absolute",top:140,left:0,right:0,zIndex:30,padding:"0 12px"}}>
+          <div style={{maxWidth:1400,margin:"0 auto",background:"rgba(255,255,255,0.96)",backdropFilter:"blur(16px)",borderRadius:16,padding:"10px 14px",border:"1px solid rgba(0,0,0,0.07)",boxShadow:"0 6px 24px -8px rgba(15,23,42,0.15)"}}>
+            <div style={{display:"flex",flexWrap:"wrap",alignItems:"center",gap:"8px 10px"}}>
+              {/* Category chips */}
+              <div style={{display:"flex",flexWrap:"wrap",gap:4}}>
+                {ALL_CATS.map(c=>{const on=selCats.has(c);return(
+                  <button key={c} onClick={()=>toggleCat(c)} className="cat-chip" style={{borderRadius:999,padding:"3px 9px",fontSize:11,fontWeight:500,cursor:"pointer",border:"1px solid",background:on?"#2563eb":"#f8fafc",color:on?"white":"#334155",borderColor:on?"#2563eb":"#e2e8f0"}}>
+                    <span style={{marginRight:3}}>{CAT_ICON[c]}</span>{CAT_LABEL[c]}
+                  </button>
+                );})}
+              </div>
+              <div style={{width:1,height:22,background:"#e2e8f0",flexShrink:0}}/>
+              {/* Distance */}
+              <div style={{display:"flex",alignItems:"center",gap:5}}>
+                <span style={{fontSize:9,color:"#94a3b8",fontWeight:700,textTransform:"uppercase",letterSpacing:"0.09em",flexShrink:0}}>Dist</span>
+                <div style={{display:"flex",background:"#f1f5f9",borderRadius:9,overflow:"hidden",border:"1px solid #e2e8f0"}}>
+                  {[["all","Any"],["very_close","<500m"],["nearby","<2km"],["short_drive","<10km"]].map(([v,l])=>(
+                    <button key={v} onClick={()=>setDistBand(v)} style={{padding:"4px 9px",fontSize:10,border:"none",cursor:"pointer",fontWeight:600,background:distBand===v?"#2563eb":"transparent",color:distBand===v?"white":"#475569"}}>{l}</button>
+                  ))}
+                </div>
+              </div>
+              {/* Per-cat */}
+              <div style={{display:"flex",alignItems:"center",gap:5}}>
+                <span style={{fontSize:9,color:"#94a3b8",fontWeight:700,textTransform:"uppercase",letterSpacing:"0.09em",flexShrink:0}}>Per cat</span>
+                <input type="range" min={2} max={15} value={perCat} onChange={e=>setPerCat(Number(e.target.value))} style={{width:70}}/>
+                <span style={{fontSize:11,fontWeight:700,minWidth:16,textAlign:"right"}}>{perCat}</span>
+              </div>
+              {/* Plan start time */}
+              <div style={{display:"flex",alignItems:"center",gap:5}}>
+                <span style={{fontSize:9,color:"#94a3b8",fontWeight:700,textTransform:"uppercase",letterSpacing:"0.09em",flexShrink:0}}>Start</span>
+                <input type="time" value={planStartStr} onChange={e=>setPlanStartStr(e.target.value)}
+                  style={{fontSize:12,fontWeight:600,border:"1px solid #e2e8f0",borderRadius:9,padding:"3px 8px",background:"white",color:"#0f172a",outline:"none"}}/>
+              </div>
+              <div style={{marginLeft:"auto",display:"flex",alignItems:"center",gap:10}}>
+                <span style={{fontSize:10,color:"#94a3b8"}}>{poisLoading?"⌛ Loading…":`${filtered.length} places`}</span>
+                <button onClick={doGeneratePlan} disabled={poisLoading||filtered.length===0}
+                  style={{background:"#2563eb",color:"white",border:"none",borderRadius:10,padding:"7px 16px",fontSize:11,fontWeight:700,letterSpacing:"0.04em",cursor:"pointer",opacity:(poisLoading||!filtered.length)?0.45:1}}>
+                  ✨ Generate smart plan
+                </button>
+              </div>
+            </div>
+            {originLabel&&<div style={{fontSize:10,color:"#94a3b8",marginTop:5,paddingLeft:2}}>{originLabel}</div>}
+          </div>
+        </div>
+      )}
+
+      {/* ── Hero ── */}
+      {!origin&&(
+        <div style={{position:"absolute",inset:0,pointerEvents:"none",display:"flex",alignItems:"flex-end",justifyContent:"center",paddingBottom:52,zIndex:10}}>
+          <div style={{textAlign:"center",maxWidth:560,padding:"0 20px"}}>
+            <p style={{fontSize:9,fontWeight:700,letterSpacing:"0.28em",textTransform:"uppercase",color:"#94a3b8",marginBottom:12}}>Live travel discovery map</p>
+            <h1 style={{fontSize:"clamp(1.8rem,5vw,2.9rem)",fontWeight:800,lineHeight:1.06,letterSpacing:"-0.025em",marginBottom:12}}>
+              I'm here now.<br/><span style={{color:"#94a3b8"}}>What's worth doing?</span>
+            </h1>
+            <p style={{fontSize:13,color:"#64748b",lineHeight:1.65,maxWidth:420,margin:"0 auto"}}>
+              Search a destination or share your GPS — the map fills instantly. Hit <strong>Generate smart plan</strong> to get a full day itinerary tailored to the time of day.
+            </p>
+          </div>
+        </div>
+      )}
+
+      {/* ── Bottom sheet — side-by-side layout ── */}
+      {origin&&(
+        <div style={{position:"absolute",bottom:0,left:0,right:0,zIndex:30,transform:sheetOpen?"translateY(0)":"translateY(calc(100% - 52px))",transition:"transform 0.3s cubic-bezier(0.4,0,0.2,1)"}}>
+          <div style={{maxWidth:1160,margin:"0 auto"}}>
+
+            {/* Handle */}
+            <button onClick={()=>setSheetOpen(v=>!v)} style={{display:"flex",alignItems:"center",justifyContent:"center",gap:8,background:"rgba(255,255,255,0.96)",backdropFilter:"blur(14px)",border:"1px solid rgba(0,0,0,0.07)",borderRadius:"14px 14px 0 0",padding:"10px 24px",margin:"0 auto",cursor:"pointer",fontSize:12,fontWeight:600,color:"#334155",boxShadow:"0 -4px 14px rgba(0,0,0,0.06)"}}>
+              {sheetOpen?"▾ Hide":`▴ ${filtered.length} places · ${plan.length} in plan`}
+            </button>
+
+            {/* Side-by-side body */}
+            {sheetOpen&&(
+              <div style={{display:"flex",maxHeight:"62vh",background:"rgba(255,255,255,0.98)",backdropFilter:"blur(20px)",borderTop:"1px solid rgba(0,0,0,0.06)",boxShadow:"0 -20px 60px -20px rgba(15,23,42,0.22)"}}>
+
+                {/* ── LEFT: Places ── */}
+                <div style={{flex:1,minWidth:0,overflowY:"auto",padding:"10px 12px 28px"}}>
+                  <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",padding:"2px 4px 8px"}}>
+                    {plan.length>0 ? (
+                      <button onClick={()=>{setPlan([]);setHighlightId(null);}} title="Clear the itinerary and browse places again"
+                        style={{background:"none",border:"1px solid #e2e8f0",borderRadius:8,padding:"3px 10px",fontSize:11,fontWeight:600,color:"#64748b",cursor:"pointer"}}>
+                        ← Back to browse
+                      </button>
+                    ) : (
+                      <span style={{fontSize:11,fontWeight:700,color:"#64748b",textTransform:"uppercase",letterSpacing:"0.08em"}}>
+                        📍 Places {filtered.length > 0 && `(${filtered.length})`}
+                      </span>
+                    )}
+                    {poisLoading&&<span style={{fontSize:10,color:"#94a3b8",display:"inline-flex",alignItems:"center",gap:4}}><span style={{animation:"spin 1s linear infinite",display:"inline-block"}}>⌛</span> Loading…</span>}
+                  </div>
+
+                  {plan.length>0 ? (
+                    <ItineraryBuckets
+                      groups={itinGroups}
+                      total={plan.length}
+                      dragId={dragId}
+                      highlightId={highlightId}
+                      onDragStart={onDragStart}
+                      onDragOver={onDragOver}
+                      onDragEnd={()=>setDragId(null)}
+                      onRemove={removeFromPlan}
+                      onClickItem={focusItem}
+                      itemRefs={itemRefs}
+                    />
+                  ) : (<>
+                  {!poisLoading&&selCats.size===0&&(
+                    <div style={{textAlign:"center",padding:"28px 12px",color:"#94a3b8",fontSize:13}}>
+                      <div style={{fontSize:32,marginBottom:10}}>☝️</div>
+                      <p style={{margin:0,fontWeight:600,color:"#64748b"}}>Pick your categories above</p>
+                      <p style={{margin:"6px 0 0",fontSize:12}}>Select what you're interested in (the order you pick sets the bucket order), then hit <strong>Generate smart plan</strong>.</p>
+                    </div>
+                  )}
+                  {!poisLoading&&selCats.size>0&&filtered.length===0&&(
+                    <div style={{textAlign:"center",padding:"20px 0",color:"#94a3b8",fontSize:13}}>
+                      {poisError??"No places match. Try widening the distance filter."}
+                    </div>
+                  )}
+
+                  {[...groupedByCat.entries()].map(([cat,items])=>{
+                    if(!items.length) return null;
+                    // closest and furthest distance in this category
+                    const minKm=items[0]?.distance_km??0;
+                    const maxKm=items[items.length-1]?.distance_km??0;
+                    const distRange=minKm===maxKm
+                      ? (minKm<1?`${Math.round(minKm*1000)}m`:`${minKm.toFixed(1)}km`)
+                      : `${minKm<1?Math.round(minKm*1000)+"m":minKm.toFixed(1)+"km"} – ${maxKm<1?Math.round(maxKm*1000)+"m":maxKm.toFixed(1)+"km"}`;
+                    return(
+                      <section key={cat} style={{marginBottom:16}}>
+                        {/* Category header */}
+                        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"0 2px",marginBottom:7}}>
+                          <h3 style={{margin:0,fontSize:12,fontWeight:700,color:"#0f172a",display:"flex",alignItems:"center",gap:6}}>
+                            <span style={{fontSize:15}}>{CAT_ICON[cat]}</span>
+                            {CAT_LABEL[cat]}
+                            <span style={{fontWeight:400,color:"#94a3b8",fontSize:11}}>· {distRange}</span>
+                          </h3>
+                          <span style={{fontSize:10,color:"#94a3b8",background:"#f1f5f9",borderRadius:6,padding:"2px 7px",fontWeight:600}}>{items.length}</span>
+                        </div>
+                        <ul style={{margin:0,padding:0,listStyle:"none",display:"flex",flexDirection:"column",gap:5}}>
+                          {items.map(p=>{
+                            const added=planIds.has(p.id);
+                            const posIdx=plan.findIndex(x=>x.id===p.id);
+                            const isEditing=editingPosId===p.id;
+                            const bandDot=<span style={{display:"inline-block",width:6,height:6,borderRadius:999,background:BAND_COLOR[p.band],flexShrink:0}}/>;
+                            return(
+                              <li key={p.id}>
+                                <div className="poi-card" style={{display:"flex",alignItems:"center",gap:8,background:added?"#eff6ff":"white",border:`1px solid ${added?"#bfdbfe":"#e2e8f0"}`,borderRadius:12,padding:"8px 10px"}}>
+                                  {/* Map focus button */}
+                                  <button onClick={()=>setMapFocus({lat:p.lat,lng:p.lng,zoom:17})} style={{width:32,height:32,borderRadius:8,background:"#f8fafc",border:"1px solid #e2e8f0",display:"flex",alignItems:"center",justifyContent:"center",fontSize:15,cursor:"pointer",flexShrink:0}}>
+                                    {CAT_ICON[p.category]}
+                                  </button>
+                                  {/* Name + distance + extras */}
+                                  <div style={{flex:1,minWidth:0}}>
+                                    {/* Primary name row: English (or local) + translate button */}
+                                    <div style={{display:"flex",alignItems:"center",gap:4,minWidth:0}}>
+                                      <button onClick={()=>setMapFocus({lat:p.lat,lng:p.lng,zoom:17})} style={{background:"none",border:"none",cursor:"pointer",padding:0,fontWeight:600,fontSize:13,textAlign:"left",overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",color:"#0f172a",flex:1,minWidth:0}}>
+                                        {(()=>{const tr=translations.get(p.id);return tr?.text||p.name;})()}
+                                      </button>
+                                      {/* 🌐 button: only when a local (non-English) name exists */}
+                                      {p.nameLocal&&(()=>{
+                                        const tr=translations.get(p.id);
+                                        if(tr?.loading) return <span style={{fontSize:10,color:"#94a3b8",flexShrink:0}}>…</span>;
+                                        if(tr?.text) return null;
+                                        return <button onClick={()=>translateName(p)} title="Translate name" style={{flexShrink:0,background:"none",border:"none",cursor:"pointer",fontSize:12,padding:"0 2px",color:"#94a3b8",lineHeight:1}}>🌐</button>;
+                                      })()}
+                                    </div>
+                                    {/* Original local-language name as subtitle */}
+                                    {p.nameLocal&&<div style={{fontSize:10,color:"#94a3b8",marginTop:1,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{p.nameLocal}</div>}
+                                    {/* Distance · effort · price */}
+                                    <div style={{display:"flex",alignItems:"center",gap:5,marginTop:2,flexWrap:"wrap"}}>
+                                      {bandDot}
+                                      <span style={{fontSize:10,color:"#94a3b8"}}>{p.distance_km<1?`${Math.round(p.distance_km*1000)}m`:p.distance_km.toFixed(1)+"km"}</span>
+                                      <span style={{fontSize:10,color:"#cbd5e1"}}>·</span>
+                                      <span style={{fontSize:10,color:"#94a3b8"}}>{p.effort}</span>
+                                      {(()=>{const pt=getPriceTier(p.tags||{});return pt?<><span style={{fontSize:10,color:"#cbd5e1"}}>·</span><span style={{fontSize:10,color:"#059669",fontWeight:600}}>{pt}</span></>:null;})()}
+                                    </div>
+                                    {/* Website link */}
+                                    {(()=>{const w=p.tags?.website||p.tags?.url||p.tags?.["contact:website"];return w?(<div style={{marginTop:3}}><a href={w.startsWith("http")?w:"https://"+w} target="_blank" rel="noopener noreferrer" style={{fontSize:10,color:"#2563eb",textDecoration:"none",fontWeight:500}}>🔗 Website →</a></div>):null;})()}
+                                    {/* Booking links for hotels/tours */}
+                                    {(p.category==="hotel"||p.category==="tour")&&(
+                                      <div style={{marginTop:3}}>
+                                        <a href={p.category==="hotel"?bookingUrl(p.name,p.lat,p.lng):gygUrl(p.name,p.lat,p.lng)}
+                                           target="_blank" rel="noopener noreferrer"
+                                           style={{fontSize:10,color:"#2563eb",textDecoration:"none",fontWeight:500,background:"#eff6ff",borderRadius:4,padding:"1px 6px"}}>
+                                          {p.category==="hotel"?"🏨 Check availability":"🎟️ Find tours"} →
+                                        </a>
+                                      </div>
+                                    )}
+                                  </div>
+                                  {/* Add / badge / reorder */}
+                                  {added?(
+                                    <div style={{flexShrink:0,display:"flex",flexDirection:"column",alignItems:"center",gap:2}}>
+                                      {isEditing?(
+                                        <select autoFocus defaultValue={posIdx}
+                                          onBlur={()=>setEditingPosId(null)}
+                                          onChange={e=>{moveToPlanPos(p.id,Number(e.target.value));setEditingPosId(null);}}
+                                          style={{fontSize:11,fontWeight:700,border:"1px solid #bfdbfe",borderRadius:8,padding:"4px 6px",background:"#eff6ff",color:"#2563eb",cursor:"pointer",outline:"none"}}>
+                                          {plan.map((_,i)=><option key={i} value={i}>#{i+1}</option>)}
+                                        </select>
+                                      ):(
+                                        <button onClick={()=>setEditingPosId(p.id)} title="Click to change order"
+                                          style={{background:"#2563eb",color:"white",border:"none",borderRadius:8,padding:"3px 9px",fontSize:11,fontWeight:800,cursor:"pointer",minWidth:30,textAlign:"center"}}>
+                                          #{posIdx+1}
+                                        </button>
+                                      )}
+                                      <button onClick={()=>removeFromPlan(p.id)} style={{fontSize:9,color:"#94a3b8",background:"none",border:"none",cursor:"pointer",padding:0,lineHeight:1.2}}>remove</button>
+                                    </div>
+                                  ):(
+                                    <button onClick={()=>addToPlan(p)} style={{flexShrink:0,border:"1px solid #e2e8f0",borderRadius:9,padding:"5px 9px",fontSize:11,fontWeight:700,cursor:"pointer",background:"white",color:"#334155"}}>
+                                      + Add
+                                    </button>
+                                  )}
+                                </div>
+                              </li>
+                            );
+                          })}
+                        </ul>
+                      </section>
+                    );
+                  })}
+                  </>)}
+                  <p style={{textAlign:"center",fontSize:9,color:"#cbd5e1",marginTop:8}}>
+                    Distances straight-line · © OpenStreetMap
+                  </p>
+                </div>
+
+                {/* ── DIVIDER ── */}
+                {plan.length>0&&<div style={{width:1,background:"#e2e8f0",flexShrink:0}}/>}
+
+                {/* ── RIGHT: Plan timeline ── */}
+                {plan.length>0&&(
+                  <div style={{width:360,flexShrink:0,overflowY:"auto",padding:"10px 12px 28px"}}>
+                    <div style={{padding:"2px 4px 8px",display:"flex",alignItems:"center",justifyContent:"space-between"}}>
+                      <span style={{fontSize:11,fontWeight:700,color:"#64748b",textTransform:"uppercase",letterSpacing:"0.08em"}}>🗺️ Your plan</span>
+                      <button onClick={saveTrip} style={{background:"#2563eb",color:"white",border:"none",borderRadius:8,padding:"4px 12px",fontSize:11,fontWeight:700,cursor:"pointer"}}>
+                        💾 Save{!user&&" ✦"}
+                      </button>
+                    </div>
+                    <TimelineView
+                      timeline={timeline}
+                      planIds={planIds}
+                      onRemove={removeFromPlan}
+                      onMove={movePlan}
+                      onFocus={focusItem}
+                      onDragStart={onDragStart}
+                      onDragOver={onDragOver}
+                      onDragEnd={()=>setDragId(null)}
+                      dragId={dragId}
+                      onSave={saveTrip}
+                      user={user}
+                    />
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById("root")).render(<App/>);
+
+</script>
+</body>
+</html>
