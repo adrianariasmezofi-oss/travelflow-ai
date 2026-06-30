@@ -235,6 +235,31 @@ function gygUrl(name, lat, lng) {
   const q = encodeURIComponent(name);
   return `https://www.getyourguide.com/s/?q=${q}&partner_id=${GYG_AFFILIATE_ID}`;
 }
+
+// ── Navigation deep-links — zero-cost handoff to the user's nav app ──
+// Google Maps: full multi-stop route in order (works on iOS, Android, web).
+function gmapsRouteUrl(stops, travelmode="walking") {
+  if(!stops || stops.length<1) return null;
+  const pts=stops.map(s=>`${s.lat},${s.lng}`);
+  const u=new URL("https://www.google.com/maps/dir/");
+  u.searchParams.set("api","1");
+  u.searchParams.set("origin",pts[0]);
+  u.searchParams.set("destination",pts[pts.length-1]);
+  const waypoints=pts.slice(1,-1);            // the stops in between #1 and #last
+  if(waypoints.length) u.searchParams.set("waypoints",waypoints.join("|"));
+  u.searchParams.set("travelmode",travelmode);
+  return u.toString();
+}
+// Apple Maps: officially honors one destination; we chain stops with +to: best-effort.
+function appleRouteUrl(stops, travelmode="walking") {
+  if(!stops || stops.length<1) return null;
+  const daddr=stops.map(s=>`${s.lat},${s.lng}`).join("+to:"); // literal +to: (do not encode)
+  return `https://maps.apple.com/?daddr=${daddr}&dirflg=${travelmode==="driving"?"d":"w"}`;
+}
+// Waze: single destination only — used per-stop ("navigate to this stop").
+function wazeUrl(lat, lng) {
+  return `https://waze.com/ul?ll=${lat},${lng}&navigate=yes`;
+}
 const subtypeOf = t => t.amenity||t.tourism||t.leisure||t.historic||t.shop||t.natural||"place";
 
 // ═══════════════════════════════════════════════════
@@ -798,8 +823,10 @@ function TimelineView({ timeline, planIds, onRemove, onMove, onFocus, onDragStar
                       <span style={{fontSize:10,color:"#94a3b8"}}>·</span>
                       <span style={{fontSize:11,color:"#94a3b8"}}>{formatDist(stop.distance_km)}</span>
                     </div>
-                    <div style={{fontSize:10,color:"#94a3b8",marginTop:2}}>
-                      {formatTime(stop.startAt)} – {formatTime(stop.endAt)}
+                    <div style={{display:"flex",alignItems:"center",gap:8,marginTop:2}}>
+                      <span style={{fontSize:10,color:"#94a3b8"}}>{formatTime(stop.startAt)} – {formatTime(stop.endAt)}</span>
+                      <a href={wazeUrl(stop.lat,stop.lng)} target="_blank" rel="noopener noreferrer" title="Navigate to this stop in Waze"
+                         style={{fontSize:10,color:"#2563eb",textDecoration:"none",fontWeight:600}}>Waze →</a>
                     </div>
                   </div>
                   {/* Controls */}
@@ -883,6 +910,8 @@ function App() {
 
   // Plan
   const [plan,setPlan]=useState([]);
+  const [navMode,setNavMode]=useState("walking"); // travel mode for export links
+  const [copiedRoute,setCopiedRoute]=useState(false);
   const [dragId,setDragId]=useState(null);
   const [highlightId,setHighlightId]=useState(null); // synced highlight between list & map
   const itemRefs=useRef(new Map());                  // id → list <li> (for scroll-into-view)
@@ -1428,6 +1457,38 @@ function App() {
                         💾 Save{!user&&" ✦"}
                       </button>
                     </div>
+
+                    {/* ── Navigate / export route ── */}
+                    <div style={{background:"#f8fafc",border:"1px solid #e2e8f0",borderRadius:14,padding:"10px 11px",marginBottom:12}}>
+                      <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:8}}>
+                        <span style={{fontSize:11,fontWeight:700,color:"#0f172a"}}>🧭 Navigate this route</span>
+                        <div style={{display:"flex",gap:3,background:"#e2e8f0",borderRadius:8,padding:2}}>
+                          {[["walking","🚶"],["driving","🚗"]].map(([m,ic])=>(
+                            <button key={m} onClick={()=>setNavMode(m)} title={m}
+                              style={{border:"none",borderRadius:6,padding:"3px 9px",fontSize:12,cursor:"pointer",background:navMode===m?"white":"transparent",boxShadow:navMode===m?"0 1px 3px rgba(0,0,0,0.12)":"none"}}>{ic}</button>
+                          ))}
+                        </div>
+                      </div>
+                      {/* Google Maps — full multi-stop route in order */}
+                      <a href={gmapsRouteUrl(plan,navMode)} target="_blank" rel="noopener noreferrer"
+                         style={{display:"flex",alignItems:"center",justifyContent:"center",gap:7,background:"#2563eb",color:"white",borderRadius:10,padding:"9px 12px",fontSize:12.5,fontWeight:700,textDecoration:"none"}}>
+                        Open all {plan.length} stops in Google Maps →
+                      </a>
+                      <div style={{display:"flex",gap:6,marginTop:6}}>
+                        <a href={appleRouteUrl(plan,navMode)} target="_blank" rel="noopener noreferrer"
+                           style={{flex:1,textAlign:"center",background:"white",border:"1px solid #e2e8f0",color:"#334155",borderRadius:10,padding:"7px 8px",fontSize:11.5,fontWeight:600,textDecoration:"none"}}>
+                          Apple Maps
+                        </a>
+                        <button onClick={()=>{const u=gmapsRouteUrl(plan,navMode); if(u&&navigator.clipboard){navigator.clipboard.writeText(u).then(()=>{setCopiedRoute(true);setTimeout(()=>setCopiedRoute(false),1600);});}}}
+                           style={{flex:1,background:"white",border:"1px solid #e2e8f0",color:"#334155",borderRadius:10,padding:"7px 8px",fontSize:11.5,fontWeight:600,cursor:"pointer"}}>
+                          {copiedRoute?"✓ Copied":"Copy link"}
+                        </button>
+                      </div>
+                      <p style={{fontSize:10,color:"#94a3b8",margin:"7px 2px 0",lineHeight:1.4}}>
+                        Reorder the stops below and tap again — the link rebuilds in the new order. Apple Maps may open only the final stop; Waze (per stop) is on each card below.
+                      </p>
+                    </div>
+
                     <TimelineView
                       timeline={timeline}
                       planIds={planIds}
