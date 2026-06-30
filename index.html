@@ -367,20 +367,20 @@ function buildTimeline(plan, startTime = new Date()) {
 //  POI DISCOVERY (single combined Overpass query)
 // ═══════════════════════════════════════════════════
 const OVERPASS_ENDPOINTS = [
+  "https://overpass.kumi.systems/api/interpreter",   // usually the fastest / least loaded → try first
   "https://overpass-api.de/api/interpreter",
-  "https://overpass.kumi.systems/api/interpreter",
   "https://overpass.private.coffee/api/interpreter",
 ];
 
 async function runOverpass(query, signal) {
   // Hedged parallel requests: fire all mirrors with a stagger so we don't
   // hammer every server when the first one is fast.
-  // Delay: mirror[0]=0ms, mirror[1]=1500ms, mirror[2]=3000ms.
+  // Delay: mirror[0]=0ms, mirror[1]=700ms, mirror[2]=1400ms.
   // Whichever answers first wins; the rest are cancelled immediately.
   const body    = "data=" + encodeURIComponent(query);
   const headers = { "Content-Type": "application/x-www-form-urlencoded", Accept: "application/json" };
   const acs     = OVERPASS_ENDPOINTS.map(() => new AbortController());
-  const STAGGER = [0, 1500, 3000];
+  const STAGGER = [0, 700, 1400];
   const timers  = [];
 
   const cancelAll = () => {
@@ -440,36 +440,41 @@ async function fetchNominatimFallback(origin, radiusM, thinCats, signal) {
   const lngD=rKm/(111*Math.max(0.2,Math.cos(origin.lat*Math.PI/180)));
   const viewbox=[origin.lng-lngD,origin.lat+latD,origin.lng+lngD,origin.lat-latD].join(",");
   const QS={food:"restaurant",drink:"cafe bar",beach:"beach",museum:"museum gallery",viewpoint:"viewpoint mirador",attraction:"tourist attraction",park:"park garden",historic:"historic monument church",shopping:"mall market",nightlife:"nightclub",wellness:"spa wellness",adventure:"hiking trail",hotel:"hotel hostel accommodation",tour:"tour operator guided tours experiences"};
-  const out=[],seen=new Set();
-  for (const cat of thinCats.slice(0,5)) {
-    if (signal?.aborted) break;
-    const q=QS[cat]; if(!q) continue;
+  const cats=thinCats.filter(c=>QS[c]).slice(0,4);
+  // Fire the per-category lookups in PARALLEL (was sequential → up to ~20s)
+  const perCat=await Promise.all(cats.map(async cat=>{
+    if(signal?.aborted) return [];
     const ac=new AbortController(); const u=()=>ac.abort(); signal?.addEventListener("abort",u);
     const t=setTimeout(()=>ac.abort(),4_000);
     try {
-      const res=await fetch(`https://nominatim.openstreetmap.org/search?${new URLSearchParams({q,format:"json",limit:"15","accept-language":"en",bounded:"1",viewbox,addressdetails:"0"})}`,{signal:ac.signal});
-      if(!res.ok) continue;
-      for (const row of await res.json()) {
+      const res=await fetch(`https://nominatim.openstreetmap.org/search?${new URLSearchParams({q:QS[cat],format:"json",limit:"12","accept-language":"en",bounded:"1",viewbox,addressdetails:"0"})}`,{signal:ac.signal});
+      if(!res.ok) return [];
+      const rows=await res.json();
+      return rows.map(row=>{
         const lat=Number(row.lat),lng=Number(row.lon);
-        if(!isFinite(lat)||!isFinite(lng)) continue;
-        const km=haversineKm(origin,{lat,lng}); if(km*1000>radiusM) continue;
-        const name=row.name||row.display_name.split(",")[0]; if(!name) continue;
-        const k=`${name.toLowerCase()}|${lat.toFixed(3)}|${lng.toFixed(3)}`;
-        if(seen.has(k)) continue; seen.add(k);
-        out.push({id:`nom-${row.place_id}-${cat}`,name,category:cat,subtype:row.type||"place",lat,lng,distance_km:km,band:bandFor(km),effort:effortFor(km),tags:{source:"nominatim"}});
-      }
-    } catch {}
+        if(!isFinite(lat)||!isFinite(lng)) return null;
+        const km=haversineKm(origin,{lat,lng}); if(km*1000>radiusM) return null;
+        const name=row.name||row.display_name.split(",")[0]; if(!name) return null;
+        return {id:`nom-${row.place_id}-${cat}`,name,category:cat,subtype:row.type||"place",lat,lng,distance_km:km,band:bandFor(km),effort:effortFor(km),tags:{source:"nominatim"}};
+      }).filter(Boolean);
+    } catch { return []; }
     finally { clearTimeout(t); signal?.removeEventListener("abort",u); }
+  }));
+  // Merge + dedupe across categories
+  const out=[],seen=new Set();
+  for(const arr of perCat) for(const p of arr){
+    const k=`${p.name.toLowerCase()}|${p.lat.toFixed(3)}|${p.lng.toFixed(3)}`;
+    if(!seen.has(k)){seen.add(k);out.push(p);}
   }
   return out;
 }
 
 const _poiCache=new Map(), CACHE_TTL=5*60_000;
 
-async function fetchNearbyPOIs(origin, radiusM=25_000, signal) {
+async function fetchNearbyPOIs(origin, radiusM=25_000, signal, onPartial) {
   const ck=`${origin.lat.toFixed(2)}|${origin.lng.toFixed(2)}`; // ~1 km grid → cache survives small pans
   const hit=_poiCache.get(ck);
-  if(hit&&Date.now()-hit.ts<CACHE_TTL) return hit.pois;
+  if(hit&&Date.now()-hit.ts<CACHE_TTL){ onPartial?.(hit.pois,{done:true}); return hit.pois; }
 
   const {lat,lng}=origin;
   const r5=Math.min(radiusM,5_000),r8=Math.min(radiusM,8_000),r12=Math.min(radiusM,12_000),r25=Math.min(radiusM,25_000);
@@ -514,24 +519,31 @@ async function fetchNearbyPOIs(origin, radiusM=25_000, signal) {
     if(seen.has(k)) continue; seen.add(k);
     out.push({id:`${el.type[0]}${el.id}`,name,nameLocal:nameLocalDiff,category:cat,subtype:subtypeOf(tags),lat:elat,lng:elng,distance_km:km,band:bandFor(km),effort:effortFor(km),tags});
   }
-
-  if(out.length<8&&!signal?.aborted){
-    for(const p of await fetchWikipediaPOIs(origin,radiusM,signal)){
-      const k=`${p.name.toLowerCase()}|${p.lat.toFixed(4)}|${p.lng.toFixed(4)}`;
-      if(!seen.has(k)){seen.add(k);out.push(p);}
-    }
-  }
-  const counts=new Map();
-  for(const p of out) counts.set(p.category,(counts.get(p.category)??0)+1);
-  const thin=ALL_CATS.filter(c=>(counts.get(c)??0)<3);
-  if(thin.length&&!signal?.aborted){
-    for(const p of await fetchNominatimFallback(origin,radiusM,thin,signal)){
-      const k=`${p.name.toLowerCase()}|${p.lat.toFixed(4)}|${p.lng.toFixed(4)}`;
-      if(!seen.has(k)){seen.add(k);out.push(p);}
-    }
-  }
   out.sort((a,b)=>a.distance_km-b.distance_km);
+
+  // PHASE 1 — show the Overpass results immediately (this is what the user sees fast).
+  onPartial?.(out.slice(),{done:false});
+
+  // PHASE 2 — enrich in the background: Wikipedia + Nominatim run in PARALLEL, not in series.
+  if(!signal?.aborted){
+    const counts=new Map();
+    for(const p of out) counts.set(p.category,(counts.get(p.category)??0)+1);
+    const thin=ALL_CATS.filter(c=>(counts.get(c)??0)<3);
+    const tasks=[];
+    if(out.length<8) tasks.push(fetchWikipediaPOIs(origin,radiusM,signal));
+    if(thin.length)  tasks.push(fetchNominatimFallback(origin,radiusM,thin,signal));
+    if(tasks.length && !signal?.aborted){
+      const extra=(await Promise.all(tasks)).flat();
+      let added=false;
+      for(const p of extra){
+        const k=`${p.name.toLowerCase()}|${p.lat.toFixed(4)}|${p.lng.toFixed(4)}`;
+        if(!seen.has(k)){seen.add(k);out.push(p);added=true;}
+      }
+      if(added) out.sort((a,b)=>a.distance_km-b.distance_km);
+    }
+  }
   if(out.length>0) _poiCache.set(ck,{ts:Date.now(),pois:out});
+  onPartial?.(out.slice(),{done:true});
   return out;
 }
 
@@ -885,6 +897,7 @@ function App() {
 
   // POIs
   const [pois,setPois]=useState([]), [poisLoading,setPoisLoading]=useState(false), [poisError,setPoisError]=useState(null);
+  const [poisEnriching,setPoisEnriching]=useState(false); // true while background Wikipedia/Nominatim merge is running
 
   // On-demand name translations: Map<id, {text:string|null, loading:bool}>
   const [translations,setTranslations]=useState(new Map());
@@ -971,12 +984,17 @@ function App() {
   useEffect(()=>{
     if(!origin){setPois([]);return;}
     let cancelled=false; const ac=new AbortController();
-    setPoisError(null);setPoisLoading(true);
+    setPoisError(null);setPoisLoading(true);setPoisEnriching(false);
+    let gotFirst=false;
     const t=setTimeout(()=>{
-      fetchNearbyPOIs(origin,25_000,ac.signal)
-        .then(r=>{if(!cancelled)setPois(Array.isArray(r)?r:[]);})
-        .catch(()=>{if(!cancelled){setPois([]);setPoisError("Places took too long — try again in a moment.");}})
-        .finally(()=>{if(!cancelled)setPoisLoading(false);});
+      fetchNearbyPOIs(origin,25_000,ac.signal,(partial,{done})=>{
+        if(cancelled) return;
+        setPois(Array.isArray(partial)?partial:[]);
+        if(!gotFirst){gotFirst=true;setPoisLoading(false);}   // stop the spinner as soon as the first batch lands
+        setPoisEnriching(!done);                              // keep a subtle "finding more…" hint while enriching
+      })
+        .catch(()=>{if(!cancelled&&!gotFirst){setPois([]);setPoisError("Places took too long — try again in a moment.");}})
+        .finally(()=>{if(!cancelled){setPoisLoading(false);setPoisEnriching(false);}});
     },300);
     return()=>{cancelled=true;ac.abort();clearTimeout(t);};
   },[origin?.lat,origin?.lng]);
@@ -1316,7 +1334,9 @@ function App() {
                       📍 Options {filtered.length > 0 && `(${filtered.length})`}
                       {plan.length>0 && <span style={{color:"#2563eb",marginLeft:6}}>· {plan.length} added</span>}
                     </span>
-                    {poisLoading&&<span style={{fontSize:10,color:"#94a3b8",display:"inline-flex",alignItems:"center",gap:4}}><span style={{animation:"spin 1s linear infinite",display:"inline-block"}}>⌛</span> Loading…</span>}
+                    {poisLoading
+                      ? <span style={{fontSize:10,color:"#94a3b8",display:"inline-flex",alignItems:"center",gap:4}}><span style={{animation:"spin 1s linear infinite",display:"inline-block"}}>⌛</span> Loading…</span>
+                      : poisEnriching&&<span style={{fontSize:10,color:"#94a3b8",display:"inline-flex",alignItems:"center",gap:4}}><span style={{animation:"spin 1s linear infinite",display:"inline-block"}}>✨</span> finding more…</span>}
                   </div>
 
                   {selCats.size>0 && filtered.length>0 && (
