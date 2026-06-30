@@ -260,6 +260,12 @@ function appleRouteUrl(stops, travelmode="walking") {
 function wazeUrl(lat, lng) {
   return `https://waze.com/ul?ll=${lat},${lng}&navigate=yes`;
 }
+// Open a place's real photos & reviews on Google Maps. Name + exact coords so even
+// an unnamed OSM point (e.g. a generic "Mirador") snaps to Google's own POI card.
+function placeReviewsUrl(name, lat, lng) {
+  const q = name ? `${name} ${lat},${lng}` : `${lat},${lng}`;
+  return `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(q)}`;
+}
 const subtypeOf = t => t.amenity||t.tourism||t.leisure||t.historic||t.shop||t.natural||"place";
 
 // ═══════════════════════════════════════════════════
@@ -837,6 +843,8 @@ function TimelineView({ timeline, planIds, onRemove, onMove, onFocus, onDragStar
                     </div>
                     <div style={{display:"flex",alignItems:"center",gap:8,marginTop:2}}>
                       <span style={{fontSize:10,color:"#94a3b8"}}>{formatTime(stop.startAt)} – {formatTime(stop.endAt)}</span>
+                      <a href={placeReviewsUrl(stop.name,stop.lat,stop.lng)} target="_blank" rel="noopener noreferrer" title="Photos & reviews on Google Maps"
+                         style={{fontSize:10,color:"#2563eb",textDecoration:"none",fontWeight:600}}>📷 Photos</a>
                       <a href={wazeUrl(stop.lat,stop.lng)} target="_blank" rel="noopener noreferrer" title="Navigate to this stop in Waze"
                          style={{fontSize:10,color:"#2563eb",textDecoration:"none",fontWeight:600}}>Waze →</a>
                     </div>
@@ -1415,6 +1423,14 @@ function App() {
                                       <span style={{fontSize:10,color:"#cbd5e1"}}>·</span>
                                       <span style={{fontSize:10,color:"#94a3b8"}}>{p.effort}</span>
                                       {(()=>{const pt=getPriceTier(p.tags||{});return pt?<><span style={{fontSize:10,color:"#cbd5e1"}}>·</span><span style={{fontSize:10,color:"#059669",fontWeight:600}}>{pt}</span></>:null;})()}
+                                    </div>
+                                    {/* Photos & reviews (Google) — helps decide between similar/unnamed places */}
+                                    <div style={{marginTop:3}}>
+                                      <a href={placeReviewsUrl(p.name,p.lat,p.lng)} target="_blank" rel="noopener noreferrer"
+                                         onClick={e=>e.stopPropagation()}
+                                         style={{fontSize:10,color:"#2563eb",textDecoration:"none",fontWeight:600,background:"#eff6ff",borderRadius:4,padding:"1px 6px"}}>
+                                        📷 Photos & reviews →
+                                      </a>
                                     </div>
                                     {/* Website link */}
                                     {(()=>{const w=p.tags?.website||p.tags?.url||p.tags?.["contact:website"];return w?(<div style={{marginTop:3}}><a href={w.startsWith("http")?w:"https://"+w} target="_blank" rel="noopener noreferrer" style={{fontSize:10,color:"#2563eb",textDecoration:"none",fontWeight:500}}>🔗 Website →</a></div>):null;})()}
