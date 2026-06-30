@@ -59,6 +59,11 @@
   .pin-label { background:rgba(255,255,255,0.94) !important; border:none !important; border-radius:6px !important; box-shadow:0 1px 5px rgba(15,23,42,0.20) !important; font-family:Inter,sans-serif !important; font-size:10px !important; font-weight:600 !important; color:#0f172a !important; padding:1px 6px !important; white-space:nowrap; }
   .pin-label::before { display:none !important; }
   .pin-label-hi { background:#2563eb !important; color:white !important; font-weight:700 !important; box-shadow:0 2px 10px rgba(37,99,235,0.5) !important; }
+  /* Un-added option labels (lighter than numbered pins) */
+  .poi-label { background:rgba(255,255,255,0.86) !important; border:none !important; border-radius:5px !important; box-shadow:0 1px 3px rgba(15,23,42,0.14) !important; font-family:Inter,sans-serif !important; font-size:9.5px !important; font-weight:500 !important; color:#475569 !important; padding:0px 5px !important; white-space:nowrap; opacity:0.92; }
+  .poi-label::before { display:none !important; }
+  .poi-dot:hover { transform:scale(1.35); }
+  .poi-dot { transition:transform 0.12s; }
 </style>
 </head>
 <body>
@@ -532,7 +537,7 @@ const zoomFor=t=>/country/.test(t)?5:/state|region|province/.test(t)?7:/county|i
 // ═══════════════════════════════════════════════════
 //  LEAFLET MAP — POI dots + numbered plan markers + route polyline
 // ═══════════════════════════════════════════════════
-function TravelMap({ center, zoom, poiMarkers=[], planRoute=[], planMarkers=[], onMarkerClick, highlightId=null }) {
+function TravelMap({ center, zoom, poiMarkers=[], planRoute=[], planMarkers=[], onMarkerClick, onPoiClick, highlightId=null }) {
   const divRef  = useRef(null);
   const mapRef  = useRef(null);
   const mksRef  = useRef(new Map());   // id → leaflet marker (POI dots)
@@ -562,20 +567,22 @@ function TravelMap({ center, zoom, poiMarkers=[], planRoute=[], planMarkers=[], 
     pinRef.current=L.marker([center.lat,center.lng],{icon,zIndexOffset:1000}).addTo(map);
   }, [center?.lat,center?.lng,zoom]);
 
-  // POI dots (non-plan)
+  // POI option dots (non-plan) — labeled with name, click to add to itinerary
   useEffect(() => {
     const map=mapRef.current; if(!map) return;
     const nextIds=new Set(poiMarkers.map(m=>m.id));
     for(const[id,mk] of mksRef.current) { if(!nextIds.has(id)){map.removeLayer(mk);mksRef.current.delete(id);} }
     for(const m of poiMarkers) {
       if(mksRef.current.has(m.id)) continue;
-      const s=8;
-      const icon=L.divIcon({className:"",html:`<div style="width:${s}px;height:${s}px;border-radius:999px;background:${m.color};border:1.5px solid white;box-shadow:0 1px 4px rgba(0,0,0,0.22);cursor:pointer;opacity:0.85"></div>`,iconSize:[s,s],iconAnchor:[s/2,s/2]});
+      const s=12;
+      const icon=L.divIcon({className:"",html:`<div class="poi-dot" title="${(m.name||"").replace(/"/g,"&quot;")} — click to add" style="width:${s}px;height:${s}px;border-radius:999px;background:${m.color};border:2px solid white;box-shadow:0 1px 5px rgba(0,0,0,0.28);cursor:pointer"></div>`,iconSize:[s,s],iconAnchor:[s/2,s/2]});
       const mk=L.marker([m.lat,m.lng],{icon});
-      if(onMarkerClick) mk.on("click",()=>onMarkerClick(m.id));
+      if(m.name) mk.bindTooltip(m.name,{permanent:true,direction:"right",offset:[s/2+1,0],className:"poi-label"});
+      // Clicking an option adds it to the itinerary (becomes a numbered pin)
+      mk.on("click",()=>{ if(onPoiClick) onPoiClick(m.id); else if(onMarkerClick) onMarkerClick(m.id); });
       mk.addTo(map); mksRef.current.set(m.id,mk);
     }
-  },[poiMarkers,onMarkerClick]);
+  },[poiMarkers,onPoiClick,onMarkerClick]);
 
   // Route polyline
   useEffect(() => {
@@ -832,62 +839,6 @@ function TimelineView({ timeline, planIds, onRemove, onMove, onFocus, onDragStar
 }
 
 // ═══════════════════════════════════════════════════
-//  ITINERARY BUCKETS — the global drag-and-drop list
-//  (category buckets in selection order, GLOBAL #1..#N numbering)
-// ═══════════════════════════════════════════════════
-function ItineraryBuckets({ groups, total, dragId, highlightId, onDragStart, onDragOver, onDragEnd, onRemove, onClickItem, itemRefs }) {
-  return (
-    <div>
-      <div style={{padding:"2px 4px 10px"}}>
-        <span style={{fontSize:11,fontWeight:700,color:"#64748b",textTransform:"uppercase",letterSpacing:"0.08em"}}>🧭 Your itinerary · {total} stop{total!==1?"s":""}</span>
-        <p style={{fontSize:11,color:"#94a3b8",margin:"4px 0 0",lineHeight:1.4}}>Drag any place to reorder — the numbers are your travel flow across <em>all</em> categories, and the map updates live.</p>
-      </div>
-      {groups.map((g,gi)=>(
-        <section key={gi} style={{marginBottom:14}}>
-          {/* Category bucket header */}
-          <div style={{display:"flex",alignItems:"center",gap:6,padding:"0 2px",marginBottom:6}}>
-            <span style={{fontSize:14}}>{CAT_ICON[g.cat]}</span>
-            <h3 style={{margin:0,fontSize:12,fontWeight:700,color:"#0f172a"}}>{CAT_LABEL[g.cat]}</h3>
-            <span style={{fontSize:10,color:"#94a3b8",background:"#f1f5f9",borderRadius:6,padding:"1px 7px",fontWeight:600}}>{g.items.length}</span>
-          </div>
-          <ul style={{margin:0,padding:0,listStyle:"none",display:"flex",flexDirection:"column",gap:5}}>
-            {g.items.map(p=>{
-              const hi=highlightId===p.id;
-              return (
-                <li key={p.id} ref={el=>{ if(el) itemRefs.current.set(p.id,el); else itemRefs.current.delete(p.id); }}>
-                  <div draggable
-                    onDragStart={()=>onDragStart(p.id)}
-                    onDragOver={e=>onDragOver(e,p.id)}
-                    onDragEnd={onDragEnd}
-                    onClick={()=>onClickItem(p)}
-                    className="poi-card"
-                    style={{display:"flex",alignItems:"center",gap:9,background:hi?"#dbeafe":"white",border:`1px solid ${hi?"#2563eb":"#e2e8f0"}`,borderRadius:12,padding:"8px 10px",cursor:"grab",opacity:dragId===p.id?0.4:1,boxShadow:hi?"0 0 0 2px rgba(37,99,235,0.18)":"none"}}>
-                    {/* Global number */}
-                    <div style={{width:28,height:28,borderRadius:999,background:hi?"#2563eb":"#0f172a",color:"white",display:"flex",alignItems:"center",justifyContent:"center",fontSize:11,fontWeight:800,flexShrink:0,boxShadow:"0 2px 8px rgba(15,23,42,0.3)"}}>{p._num}</div>
-                    {/* Name + meta */}
-                    <div style={{flex:1,minWidth:0}}>
-                      <div style={{fontWeight:600,fontSize:13,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",color:"#0f172a"}}>{p.name}</div>
-                      <div style={{display:"flex",alignItems:"center",gap:5,marginTop:2}}>
-                        <span style={{display:"inline-block",width:6,height:6,borderRadius:999,background:BAND_COLOR[p.band]}}/>
-                        <span style={{fontSize:10,color:"#94a3b8"}}>{p.distance_km<1?`${Math.round(p.distance_km*1000)}m`:p.distance_km.toFixed(1)+"km"}</span>
-                        <span style={{fontSize:10,color:"#cbd5e1"}}>·</span>
-                        <span style={{fontSize:10,color:"#94a3b8"}}>{CAT_LABEL[p.category]}</span>
-                      </div>
-                    </div>
-                    <span style={{color:"#cbd5e1",fontSize:12,userSelect:"none",cursor:"grab"}}>⋮⋮</span>
-                    <button onClick={e=>{e.stopPropagation();onRemove(p.id);}} title="Remove from itinerary" style={{border:"1px solid #fee2e2",background:"none",borderRadius:7,padding:"3px 7px",cursor:"pointer",fontSize:11,color:"#ef4444",flexShrink:0}}>✕</button>
-                  </div>
-                </li>
-              );
-            })}
-          </ul>
-        </section>
-      ))}
-    </div>
-  );
-}
-
-// ═══════════════════════════════════════════════════
 //  MAIN APP
 // ═══════════════════════════════════════════════════
 function App() {
@@ -964,17 +915,6 @@ function App() {
   const planMarkers = useMemo(()=>plan.map((p,i)=>({id:p.id,lat:p.lat,lng:p.lng,num:i+1,name:`${i+1}. ${p.name}`})),[plan]);
   const planIds = useMemo(()=>new Set(plan.map(p=>p.id)),[plan]);
 
-  // Itinerary grouped into category buckets (contiguous runs) with GLOBAL numbering.
-  // The flat `plan` array is the single source of truth; numbers = global index+1.
-  const itinGroups = useMemo(()=>{
-    const groups=[]; let cur=null;
-    plan.forEach((p,i)=>{
-      if(!cur||cur.cat!==p.category){ cur={cat:p.category,items:[]}; groups.push(cur); }
-      cur.items.push({...p,_num:i+1});
-    });
-    return groups;
-  },[plan]);
-
   // Scroll the highlighted list item into view (e.g. after clicking a map pin)
   useEffect(()=>{
     if(!highlightId) return;
@@ -1034,7 +974,7 @@ function App() {
   // POI markers (exclude plan stops — those get numbered markers)
   const poiMarkers = useMemo(()=>
     filtered.filter(p=>!planIds.has(p.id)).slice(0,120).map(p=>({
-      id:p.id,lat:p.lat,lng:p.lng,color:BAND_COLOR[p.band]
+      id:p.id,lat:p.lat,lng:p.lng,color:BAND_COLOR[p.band],name:p.name
     })),
     [filtered,planIds]
   );
@@ -1057,7 +997,12 @@ function App() {
   }
 
   function toggleCat(c){setCatOrder(o=>o.includes(c)?o.filter(x=>x!==c):[...o,c]);}
-  function addToPlan(p){setPlan(cur=>cur.some(x=>x.id===p.id)?cur:[...cur,p]);setMapFocus({lat:p.lat,lng:p.lng,zoom:16});}
+  function addToPlan(p,opts={}){
+    if(!p) return;
+    setPlan(cur=>cur.some(x=>x.id===p.id)?cur:[...cur,p]);
+    setHighlightId(p.id);
+    if(opts.focus!==false) setMapFocus({lat:p.lat,lng:p.lng,zoom:16});
+  }
   function removeFromPlan(id){setPlan(cur=>cur.filter(p=>p.id!==id));setEditingPosId(null);if(highlightId===id)setHighlightId(null);}
   // Click a list item → highlight it on the map (and focus there)
   function focusItem(p){setHighlightId(p.id);setMapFocus({lat:p.lat,lng:p.lng,zoom:16});}
@@ -1173,10 +1118,15 @@ function App() {
           planRoute={planRoute}
           planMarkers={planMarkers}
           highlightId={highlightId}
+          onPoiClick={id=>{
+            // Clicking an un-added option dot adds it to the itinerary as the next stop
+            const p=filtered.find(x=>x.id===id);
+            if(p) addToPlan(p,{focus:false});
+          }}
           onMarkerClick={id=>{
             const p=plan.find(x=>x.id===id)??filtered.find(x=>x.id===id);
             if(!p) return;
-            // Clicking a map pin highlights the matching list item (and scrolls to it)
+            // Clicking a numbered pin highlights the matching list item (and scrolls to it)
             setHighlightId(id);
             setMapFocus({lat:p.lat,lng:p.lng,zoom:16});
             if(!sheetOpen) setSheetOpen(true);
@@ -1323,7 +1273,7 @@ function App() {
 
             {/* Handle */}
             <button onClick={()=>setSheetOpen(v=>!v)} style={{display:"flex",alignItems:"center",justifyContent:"center",gap:8,background:"rgba(255,255,255,0.96)",backdropFilter:"blur(14px)",border:"1px solid rgba(0,0,0,0.07)",borderRadius:"14px 14px 0 0",padding:"10px 24px",margin:"0 auto",cursor:"pointer",fontSize:12,fontWeight:600,color:"#334155",boxShadow:"0 -4px 14px rgba(0,0,0,0.06)"}}>
-              {sheetOpen?"▾ Hide":`▴ ${filtered.length} places · ${plan.length} in plan`}
+              {sheetOpen?"▾ Hide list — see full map":`▴ Show list · ${filtered.length} options${plan.length?` · ${plan.length} added`:""}`}
             </button>
 
             {/* Side-by-side body */}
@@ -1333,38 +1283,24 @@ function App() {
                 {/* ── LEFT: Places ── */}
                 <div style={{flex:1,minWidth:0,overflowY:"auto",padding:"10px 12px 28px"}}>
                   <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",padding:"2px 4px 8px"}}>
-                    {plan.length>0 ? (
-                      <button onClick={()=>{setPlan([]);setHighlightId(null);}} title="Clear the itinerary and browse places again"
-                        style={{background:"none",border:"1px solid #e2e8f0",borderRadius:8,padding:"3px 10px",fontSize:11,fontWeight:600,color:"#64748b",cursor:"pointer"}}>
-                        ← Back to browse
-                      </button>
-                    ) : (
-                      <span style={{fontSize:11,fontWeight:700,color:"#64748b",textTransform:"uppercase",letterSpacing:"0.08em"}}>
-                        📍 Places {filtered.length > 0 && `(${filtered.length})`}
-                      </span>
-                    )}
+                    <span style={{fontSize:11,fontWeight:700,color:"#64748b",textTransform:"uppercase",letterSpacing:"0.08em"}}>
+                      📍 Options {filtered.length > 0 && `(${filtered.length})`}
+                      {plan.length>0 && <span style={{color:"#2563eb",marginLeft:6}}>· {plan.length} added</span>}
+                    </span>
                     {poisLoading&&<span style={{fontSize:10,color:"#94a3b8",display:"inline-flex",alignItems:"center",gap:4}}><span style={{animation:"spin 1s linear infinite",display:"inline-block"}}>⌛</span> Loading…</span>}
                   </div>
 
-                  {plan.length>0 ? (
-                    <ItineraryBuckets
-                      groups={itinGroups}
-                      total={plan.length}
-                      dragId={dragId}
-                      highlightId={highlightId}
-                      onDragStart={onDragStart}
-                      onDragOver={onDragOver}
-                      onDragEnd={()=>setDragId(null)}
-                      onRemove={removeFromPlan}
-                      onClickItem={focusItem}
-                      itemRefs={itemRefs}
-                    />
-                  ) : (<>
+                  {selCats.size>0 && filtered.length>0 && (
+                    <p style={{fontSize:11,color:"#94a3b8",margin:"0 4px 8px",lineHeight:1.4}}>
+                      Tap any place — here or its pin on the map — to add it as the next stop (#{plan.length+1}).
+                    </p>
+                  )}
+
                   {!poisLoading&&selCats.size===0&&(
                     <div style={{textAlign:"center",padding:"28px 12px",color:"#94a3b8",fontSize:13}}>
                       <div style={{fontSize:32,marginBottom:10}}>☝️</div>
                       <p style={{margin:0,fontWeight:600,color:"#64748b"}}>Pick your categories above</p>
-                      <p style={{margin:"6px 0 0",fontSize:12}}>Select what you're interested in (the order you pick sets the bucket order), then hit <strong>Generate smart plan</strong>.</p>
+                      <p style={{margin:"6px 0 0",fontSize:12}}>Every matching place appears on the map with its name. Tap places to add them as stops <strong>#1, #2, #3…</strong> — or hit <strong>✨ Generate smart plan</strong> to add them all at once.</p>
                     </div>
                   )}
                   {!poisLoading&&selCats.size>0&&filtered.length===0&&(
@@ -1397,19 +1333,20 @@ function App() {
                             const added=planIds.has(p.id);
                             const posIdx=plan.findIndex(x=>x.id===p.id);
                             const isEditing=editingPosId===p.id;
+                            const hi=highlightId===p.id;
                             const bandDot=<span style={{display:"inline-block",width:6,height:6,borderRadius:999,background:BAND_COLOR[p.band],flexShrink:0}}/>;
                             return(
-                              <li key={p.id}>
-                                <div className="poi-card" style={{display:"flex",alignItems:"center",gap:8,background:added?"#eff6ff":"white",border:`1px solid ${added?"#bfdbfe":"#e2e8f0"}`,borderRadius:12,padding:"8px 10px"}}>
+                              <li key={p.id} ref={el=>{ if(el) itemRefs.current.set(p.id,el); else itemRefs.current.delete(p.id); }}>
+                                <div className="poi-card" style={{display:"flex",alignItems:"center",gap:8,background:hi?"#dbeafe":added?"#eff6ff":"white",border:`1px solid ${hi?"#2563eb":added?"#bfdbfe":"#e2e8f0"}`,borderRadius:12,padding:"8px 10px",boxShadow:hi?"0 0 0 2px rgba(37,99,235,0.18)":"none"}}>
                                   {/* Map focus button */}
-                                  <button onClick={()=>setMapFocus({lat:p.lat,lng:p.lng,zoom:17})} style={{width:32,height:32,borderRadius:8,background:"#f8fafc",border:"1px solid #e2e8f0",display:"flex",alignItems:"center",justifyContent:"center",fontSize:15,cursor:"pointer",flexShrink:0}}>
+                                  <button onClick={()=>focusItem(p)} style={{width:32,height:32,borderRadius:8,background:"#f8fafc",border:"1px solid #e2e8f0",display:"flex",alignItems:"center",justifyContent:"center",fontSize:15,cursor:"pointer",flexShrink:0}}>
                                     {CAT_ICON[p.category]}
                                   </button>
                                   {/* Name + distance + extras */}
                                   <div style={{flex:1,minWidth:0}}>
                                     {/* Primary name row: English (or local) + translate button */}
                                     <div style={{display:"flex",alignItems:"center",gap:4,minWidth:0}}>
-                                      <button onClick={()=>setMapFocus({lat:p.lat,lng:p.lng,zoom:17})} style={{background:"none",border:"none",cursor:"pointer",padding:0,fontWeight:600,fontSize:13,textAlign:"left",overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",color:"#0f172a",flex:1,minWidth:0}}>
+                                      <button onClick={()=>focusItem(p)} style={{background:"none",border:"none",cursor:"pointer",padding:0,fontWeight:600,fontSize:13,textAlign:"left",overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",color:"#0f172a",flex:1,minWidth:0}}>
                                         {(()=>{const tr=translations.get(p.id);return tr?.text||p.name;})()}
                                       </button>
                                       {/* 🌐 button: only when a local (non-English) name exists */}
@@ -1474,7 +1411,6 @@ function App() {
                       </section>
                     );
                   })}
-                  </>)}
                   <p style={{textAlign:"center",fontSize:9,color:"#cbd5e1",marginTop:8}}>
                     Distances straight-line · © OpenStreetMap
                   </p>
