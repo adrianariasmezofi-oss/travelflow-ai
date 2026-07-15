@@ -536,8 +536,9 @@ async function fetchNearbyPOIs(origin, radiusM=25_000, signal, onPartial) {
     for(const p of out) counts.set(p.category,(counts.get(p.category)??0)+1);
     const thin=ALL_CATS.filter(c=>(counts.get(c)??0)<3);
     const tasks=[];
-    if(out.length<8) tasks.push(fetchWikipediaPOIs(origin,radiusM,signal));
-    if(thin.length)  tasks.push(fetchNominatimFallback(origin,radiusM,thin,signal));
+    // Wikipedia always runs — it's parallel and non-blocking, so it's free extra coverage
+    tasks.push(fetchWikipediaPOIs(origin,radiusM,signal));
+    if(thin.length) tasks.push(fetchNominatimFallback(origin,radiusM,thin,signal));
     if(tasks.length && !signal?.aborted){
       const extra=(await Promise.all(tasks)).flat();
       let added=false;
@@ -907,6 +908,9 @@ function App() {
   // POIs
   const [pois,setPois]=useState([]), [poisLoading,setPoisLoading]=useState(false), [poisError,setPoisError]=useState(null);
   const [poisEnriching,setPoisEnriching]=useState(false); // true while background Wikipedia/Nominatim merge is running
+  // Places are PREFETCHED silently on destination select (warms the cache while the
+  // user picks filters) but only DISPLAYED after they click "Load places" / "Generate".
+  const [placesShown,setPlacesShown]=useState(false);
 
   // On-demand name translations: Map<id, {text:string|null, loading:bool}>
   const [translations,setTranslations]=useState(new Map());
@@ -1029,10 +1033,11 @@ function App() {
 
   // POI markers (exclude plan stops — those get numbered markers)
   const poiMarkers = useMemo(()=>
-    filtered.filter(p=>!planIds.has(p.id)).slice(0,120).map(p=>({
+    !placesShown ? [] :
+    filtered.filter(p=>!planIds.has(p.id)).slice(0,250).map(p=>({
       id:p.id,lat:p.lat,lng:p.lng,color:BAND_COLOR[p.band],name:p.name
     })),
-    [filtered,planIds]
+    [filtered,planIds,placesShown]
   );
 
   const mapCenter = mapFocus??(destination?{lat:destination.lat,lng:destination.lng}:gpsCoords??null);
@@ -1086,8 +1091,15 @@ function App() {
     });
   }
 
+  // If the user hits Generate while the prefetch is still in flight, remember it
+  // and auto-generate the moment places arrive.
+  const pendingGenRef=useRef(false);
+  useEffect(()=>{
+    if(!poisLoading&&pendingGenRef.current&&filtered.length){ pendingGenRef.current=false; doGeneratePlan(); }
+  },[poisLoading,filtered]);
+
   function doGeneratePlan(){
-    if(!filtered.length) return;
+    if(!filtered.length){ if(poisLoading) pendingGenRef.current=true; return; }
     // Build ONE global itinerary: category buckets in SELECTION order,
     // closest-first within each bucket. Numbering stays global (#1..#N).
     const built=[];
@@ -1285,7 +1297,7 @@ function App() {
               {/* Per-cat */}
               <div style={{display:"flex",alignItems:"center",gap:5}}>
                 <span style={{fontSize:9,color:"#94a3b8",fontWeight:700,textTransform:"uppercase",letterSpacing:"0.09em",flexShrink:0}}>Per cat</span>
-                <input type="range" min={2} max={15} value={perCat} onChange={e=>setPerCat(Number(e.target.value))} style={{width:70}}/>
+                <input type="range" min={2} max={30} value={perCat} onChange={e=>setPerCat(Number(e.target.value))} style={{width:70}}/>
                 <span style={{fontSize:11,fontWeight:700,minWidth:16,textAlign:"right"}}>{perCat}</span>
               </div>
               {/* Plan start time */}
@@ -1295,9 +1307,16 @@ function App() {
                   style={{fontSize:12,fontWeight:600,border:"1px solid #e2e8f0",borderRadius:9,padding:"3px 8px",background:"white",color:"#0f172a",outline:"none"}}/>
               </div>
               <div style={{marginLeft:"auto",display:"flex",alignItems:"center",gap:10}}>
-                <span style={{fontSize:10,color:"#94a3b8"}}>{poisLoading?"⌛ Loading…":`${filtered.length} places`}</span>
-                <button onClick={doGeneratePlan} disabled={poisLoading||filtered.length===0}
-                  style={{background:"#2563eb",color:"white",border:"none",borderRadius:10,padding:"7px 16px",fontSize:11,fontWeight:700,letterSpacing:"0.04em",cursor:"pointer",opacity:(poisLoading||!filtered.length)?0.45:1}}>
+                {placesShown&&<span style={{fontSize:10,color:"#94a3b8"}}>{poisLoading?"⌛ Loading…":`${filtered.length} places`}</span>}
+                {!placesShown&&(
+                  <button onClick={()=>{setPlacesShown(true);setSheetOpen(true);}} disabled={selCats.size===0}
+                    title={selCats.size===0?"Pick at least one category first":"Show all matching places on the map"}
+                    style={{background:"white",color:"#2563eb",border:"2px solid #2563eb",borderRadius:10,padding:"6px 16px",fontSize:11,fontWeight:700,letterSpacing:"0.04em",cursor:"pointer",opacity:selCats.size===0?0.4:1}}>
+                    📍 Load places
+                  </button>
+                )}
+                <button onClick={()=>{setPlacesShown(true);doGeneratePlan();}} disabled={selCats.size===0||(placesShown&&(poisLoading||filtered.length===0))}
+                  style={{background:"#2563eb",color:"white",border:"none",borderRadius:10,padding:"7px 16px",fontSize:11,fontWeight:700,letterSpacing:"0.04em",cursor:"pointer",opacity:(selCats.size===0||(placesShown&&(poisLoading||!filtered.length)))?0.45:1}}>
                   ✨ Generate smart plan
                 </button>
               </div>
@@ -1316,7 +1335,7 @@ function App() {
               I'm here now.<br/><span style={{color:"#94a3b8"}}>What's worth doing?</span>
             </h1>
             <p style={{fontSize:13,color:"#64748b",lineHeight:1.65,maxWidth:420,margin:"0 auto"}}>
-              Search a destination or share your GPS — the map fills instantly. Hit <strong>Generate smart plan</strong> to get a full day itinerary tailored to the time of day.
+              Search a destination or share your GPS, pick what you're into, then hit <strong>📍 Load places</strong> to explore — or <strong>✨ Generate smart plan</strong> for an instant day itinerary.
             </p>
           </div>
         </div>
@@ -1329,7 +1348,7 @@ function App() {
 
             {/* Handle */}
             <button onClick={()=>setSheetOpen(v=>!v)} style={{display:"flex",alignItems:"center",justifyContent:"center",gap:8,background:"rgba(255,255,255,0.96)",backdropFilter:"blur(14px)",border:"1px solid rgba(0,0,0,0.07)",borderRadius:"14px 14px 0 0",padding:"10px 24px",margin:"0 auto",cursor:"pointer",fontSize:12,fontWeight:600,color:"#334155",boxShadow:"0 -4px 14px rgba(0,0,0,0.06)"}}>
-              {sheetOpen?"▾ Hide list — see full map":`▴ Show list · ${filtered.length} options${plan.length?` · ${plan.length} added`:""}`}
+              {sheetOpen?"▾ Hide list — see full map":`▴ Show list${placesShown?` · ${filtered.length} options`:""}${plan.length?` · ${plan.length} added`:""}`}
             </button>
 
             {/* Side-by-side body */}
@@ -1340,34 +1359,52 @@ function App() {
                 <div style={{flex:1,minWidth:0,overflowY:"auto",padding:"10px 12px 28px"}}>
                   <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",padding:"2px 4px 8px"}}>
                     <span style={{fontSize:11,fontWeight:700,color:"#64748b",textTransform:"uppercase",letterSpacing:"0.08em"}}>
-                      📍 Options {filtered.length > 0 && `(${filtered.length})`}
+                      📍 Options {placesShown && filtered.length > 0 && `(${filtered.length})`}
                       {plan.length>0 && <span style={{color:"#2563eb",marginLeft:6}}>· {plan.length} added</span>}
                     </span>
-                    {poisLoading
+                    {placesShown&&(poisLoading
                       ? <span style={{fontSize:10,color:"#94a3b8",display:"inline-flex",alignItems:"center",gap:4}}><span style={{animation:"spin 1s linear infinite",display:"inline-block"}}>⌛</span> Loading…</span>
-                      : poisEnriching&&<span style={{fontSize:10,color:"#94a3b8",display:"inline-flex",alignItems:"center",gap:4}}><span style={{animation:"spin 1s linear infinite",display:"inline-block"}}>✨</span> finding more…</span>}
+                      : poisEnriching&&<span style={{fontSize:10,color:"#94a3b8",display:"inline-flex",alignItems:"center",gap:4}}><span style={{animation:"spin 1s linear infinite",display:"inline-block"}}>✨</span> finding more…</span>)}
                   </div>
 
-                  {selCats.size>0 && filtered.length>0 && (
+                  {!placesShown&&(
+                    <div style={{textAlign:"center",padding:"28px 12px",color:"#94a3b8",fontSize:13}}>
+                      <div style={{fontSize:32,marginBottom:10}}>🗺️</div>
+                      <p style={{margin:0,fontWeight:600,color:"#64748b"}}>{selCats.size===0?"Pick your categories above":"Ready when you are"}</p>
+                      <p style={{margin:"6px 0 0",fontSize:12}}>
+                        {selCats.size===0
+                          ? <>Choose what you're interested in, then hit <strong>📍 Load places</strong>.</>
+                          : <>Hit <strong>📍 Load places</strong> to see every match on the map, or <strong>✨ Generate smart plan</strong> for an instant itinerary.</>}
+                      </p>
+                      {selCats.size>0&&(
+                        <button onClick={()=>setPlacesShown(true)}
+                          style={{marginTop:12,background:"#2563eb",color:"white",border:"none",borderRadius:10,padding:"8px 18px",fontSize:12,fontWeight:700,cursor:"pointer"}}>
+                          📍 Load places
+                        </button>
+                      )}
+                    </div>
+                  )}
+
+                  {placesShown && selCats.size>0 && filtered.length>0 && (
                     <p style={{fontSize:11,color:"#94a3b8",margin:"0 4px 8px",lineHeight:1.4}}>
                       Tap any place — here or its pin on the map — to add it as the next stop (#{plan.length+1}).
                     </p>
                   )}
 
-                  {!poisLoading&&selCats.size===0&&(
+                  {placesShown&&!poisLoading&&selCats.size===0&&(
                     <div style={{textAlign:"center",padding:"28px 12px",color:"#94a3b8",fontSize:13}}>
                       <div style={{fontSize:32,marginBottom:10}}>☝️</div>
                       <p style={{margin:0,fontWeight:600,color:"#64748b"}}>Pick your categories above</p>
                       <p style={{margin:"6px 0 0",fontSize:12}}>Every matching place appears on the map with its name. Tap places to add them as stops <strong>#1, #2, #3…</strong> — or hit <strong>✨ Generate smart plan</strong> to add them all at once.</p>
                     </div>
                   )}
-                  {!poisLoading&&selCats.size>0&&filtered.length===0&&(
+                  {placesShown&&!poisLoading&&selCats.size>0&&filtered.length===0&&(
                     <div style={{textAlign:"center",padding:"20px 0",color:"#94a3b8",fontSize:13}}>
                       {poisError??"No places match. Try widening the distance filter."}
                     </div>
                   )}
 
-                  {[...groupedByCat.entries()].map(([cat,items])=>{
+                  {placesShown&&[...groupedByCat.entries()].map(([cat,items])=>{
                     if(!items.length) return null;
                     // closest and furthest distance in this category
                     const minKm=items[0]?.distance_km??0;
