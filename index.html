@@ -157,7 +157,7 @@ const haversineKm = (a, b) => {
 };
 
 const bandFor   = km => km<0.5?"very_close":km<2?"nearby":km<10?"short_drive":"further_away";
-const effortFor = km => km<0.25?`${Math.max(1,Math.round(km*1000/80))} min walk`:km<2?`${Math.round(km/0.083)} min walk`:km<12?`~${Math.max(5,Math.round(km/0.67))} min drive`:`~${Math.round(km/60)} h drive`;
+const effortFor = km => km<0.25?`${Math.max(1,Math.round(km*1000/80))} min walk`:km<2?`${Math.round(km/0.083)} min walk`:km<12?`~${Math.max(5,Math.round(km/0.67))} min drive`:km<45?`~${Math.round(km/0.83)} min drive`:`~${String((Math.round(km/60*10)/10)).replace(/\.0$/,"")} h drive`;
 
 // Travel time in minutes + mode
 function travelBetween(a, b) {
@@ -509,6 +509,41 @@ async function fetchNominatimFallback(origin, radiusM, thinCats, signal) {
     if(!seen.has(k)){seen.add(k);out.push(p);}
   }
   return out;
+}
+
+// Per-category Overpass filters — used by the long-range "rescue" search when a
+// selected category has (almost) nothing within the normal 25km radius.
+const CAT_OVERPASS={
+  food:'nwr["amenity"~"^(restaurant|fast_food|food_court)$"]',
+  drink:'nwr["amenity"~"^(cafe|bar|pub|biergarten)$"]',
+  nightlife:'nwr["amenity"="nightclub"]',
+  wellness:'nwr["amenity"~"^(spa|sauna)$"];nwr["leisure"="spa"]',
+  museum:'nwr["tourism"~"^(museum|gallery)$"]',
+  viewpoint:'nwr["tourism"="viewpoint"];nwr["natural"~"^(peak|cliff)$"]',
+  attraction:'nwr["tourism"~"^(attraction|theme_park|zoo|aquarium)$"]',
+  beach:'nwr["natural"="beach"]',
+  park:'nwr["leisure"~"^(park|garden|nature_reserve)$"]',
+  historic:'nwr["historic"]',
+  shopping:'nwr["shop"~"^(mall|department_store|marketplace)$"]',
+  adventure:'nwr["route"~"^(hiking|bicycle|mtb)$"];nwr["sport"~"^(climbing|scuba_diving|surfing|kitesurfing|canoeing|kayaking|rafting|paragliding)$"]',
+  hotel:'nwr["tourism"~"^(hotel|hostel|guest_house|motel|apartment|chalet|resort)$"]',
+  tour:'nwr["shop"="travel_agency"];nwr["amenity"="tour_guide"]',
+};
+
+// "Any means any": when a selected category is empty nearby, look up to 120km out
+// and return the CLOSEST matches so the user always gets options (e.g. beaches
+// from an inland town).
+async function fetchCategoryLongRange(origin, cat, signal){
+  const tmpl=CAT_OVERPASS[cat]; if(!tmpl) return [];
+  const {lat,lng}=origin, R=120_000;
+  const lines=tmpl.split(";").filter(Boolean).map(l=>`${l}(around:${R},${lat},${lng});`).join("\n");
+  const q=`[out:json][timeout:15];(\n${lines}\n);out center tags 80;`;
+  const els=await runOverpass(q,signal);
+  const seen=new Set(),out=[];
+  parseOverpassElements(els,origin,seen,out);
+  return out.filter(p=>p.category===cat)
+            .sort((a,b)=>a.distance_km-b.distance_km)
+            .slice(0,40);
 }
 
 const _poiCache=new Map(), CACHE_TTL=5*60_000;
@@ -1119,6 +1154,37 @@ function App() {
     }
     targets.slice(0,30).forEach(p=>translateName(p));
   },[plan,filtered,translations]);
+
+  // "Any means any": with the distance filter open, a selected category that has
+  // (almost) nothing within the normal radius triggers a one-shot 120km search
+  // for that category, merging in the CLOSEST far-out matches (beaches from an
+  // inland town, etc.). Fired once per destination+category.
+  const longRangeRef=useRef(new Set());
+  useEffect(()=>{
+    if(!origin||!placesShown||poisLoading||distBand!=="all") return;
+    const ck=`${origin.lat.toFixed(2)}|${origin.lng.toFixed(2)}`;
+    const counts=new Map();
+    for(const p of pois) counts.set(p.category,(counts.get(p.category)??0)+1);
+    const fired=[];
+    for(const cat of catOrder){
+      if((counts.get(cat)??0)>=3) continue;
+      const key=`${ck}|${cat}`;
+      if(longRangeRef.current.has(key)) continue;
+      longRangeRef.current.add(key);
+      fired.push(fetchCategoryLongRange(origin,cat).then(list=>{
+        if(!list.length) return;
+        setPois(cur=>{
+          const seen=new Set(cur.map(p=>`${p.name.toLowerCase()}|${p.lat.toFixed(4)}|${p.lng.toFixed(4)}`));
+          const add=list.filter(p=>!seen.has(`${p.name.toLowerCase()}|${p.lat.toFixed(4)}|${p.lng.toFixed(4)}`));
+          return add.length?[...cur,...add].sort((a,b)=>a.distance_km-b.distance_km):cur;
+        });
+      }).catch(()=>{}));
+    }
+    if(fired.length){
+      setPoisEnriching(true);
+      Promise.allSettled(fired).then(()=>setPoisEnriching(false));
+    }
+  },[origin?.lat,origin?.lng,placesShown,poisLoading,distBand,catOrder,pois]);
 
   // Group by category in the order the user SELECTED them, sorted closest-first within each
   const groupedByCat=useMemo(()=>{
