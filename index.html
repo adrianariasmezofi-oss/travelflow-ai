@@ -268,6 +268,39 @@ function placeReviewsUrl(name, lat, lng) {
 }
 const subtypeOf = t => t.amenity||t.tourism||t.leisure||t.historic||t.shop||t.natural||"place";
 
+// ── Name localization (same approach as Google Maps / Waze) ──
+// Prefer the device language, then English, then a romanized form, then local.
+const DEVICE_LANG=(navigator.language||"en").split("-")[0].toLowerCase();
+// True when the string has no CJK / Cyrillic / Arabic / Hebrew / Thai / Indic / Korean chars
+function isLatinish(s){
+  return !/[Ѐ-ӿ֐-׿؀-ۿऀ-෿฀-๿຀-໿က-႟ក-៿　-ヿ㐀-䶿一-鿿가-힯豈-﫿]/.test(s||"");
+}
+// Best-effort source-language guess from the script (MyMemory needs an explicit
+// source lang — "auto" is not supported). Kana must be tested before CJK ideographs.
+function guessLang(s){
+  if(/[぀-ヿ]/.test(s)) return "ja";
+  if(/[가-힯]/.test(s)) return "ko";
+  if(/[一-鿿㐀-䶿]/.test(s)) return "zh";
+  if(/[Ѐ-ӿ]/.test(s)) return "ru";
+  if(/[؀-ۿ]/.test(s)) return "ar";
+  if(/[֐-׿]/.test(s)) return "he";
+  if(/[฀-๿]/.test(s)) return "th";
+  if(/[Ͱ-Ͽ]/.test(s)) return "el";
+  if(/[ऀ-ॿ]/.test(s)) return "hi";
+  return null;
+}
+function bestName(tags){
+  const local=tags.name||null;
+  let n=tags["name:"+DEVICE_LANG]||null;                       // 1. device language
+  if(!n) n=tags["name:en"]||tags["name:en-US"]||null;          // 2. English
+  if(!n) n=tags.int_name||null;                                // 3. international name
+  if(!n){                                                      // 4. romanization (name:ja-Latn, name:zh_rm, …)
+    for(const k in tags){ if(/^name:[a-z]{2,3}[-_](Latn|rm)$/i.test(k)&&tags[k]){ n=tags[k]; break; } }
+  }
+  if(!n) n=local;                                              // 5. local script as last resort
+  return {name:n,local};
+}
+
 // ═══════════════════════════════════════════════════
 //  SMART PLAN GENERATOR — time-aware, nearest-neighbour
 // ═══════════════════════════════════════════════════
@@ -456,7 +489,7 @@ async function fetchNominatimFallback(origin, radiusM, thinCats, signal) {
     const ac=new AbortController(); const u=()=>ac.abort(); signal?.addEventListener("abort",u);
     const t=setTimeout(()=>ac.abort(),4_000);
     try {
-      const res=await fetch(`https://nominatim.openstreetmap.org/search?${new URLSearchParams({q:QS[cat],format:"json",limit:"12","accept-language":"en",bounded:"1",viewbox,addressdetails:"0"})}`,{signal:ac.signal});
+      const res=await fetch(`https://nominatim.openstreetmap.org/search?${new URLSearchParams({q:QS[cat],format:"json",limit:"12","accept-language":`${DEVICE_LANG},en`,bounded:"1",viewbox,addressdetails:"0"})}`,{signal:ac.signal});
       if(!res.ok) return [];
       const rows=await res.json();
       return rows.map(row=>{
@@ -509,10 +542,9 @@ function lsSetPois(ck,pois){
 function parseOverpassElements(elements, origin, seen, out){
   for(const el of elements){
     const tags=el.tags??{};
-    // Prefer English name; keep local name as subtitle when it differs
-    const nameLocal=tags.name||null;
-    const nameEn=tags["name:en"]||tags["name:en-US"]||null;
-    const name=nameEn||nameLocal; if(!name) continue;
+    // Device language → English → romanized → local (see bestName)
+    const {name,local:nameLocal}=bestName(tags);
+    if(!name) continue;
     const nameLocalDiff=(nameLocal&&nameLocal!==name)?nameLocal:null;
     const elat=el.lat??el.center?.lat,elng=el.lon??el.center?.lon;
     if(elat==null||elng==null) continue;
@@ -606,7 +638,7 @@ async function searchPlaces(q) {
   if(q.trim().length<2) return [];
   const blocked=new Set(["road","highway","footway","path","residential","house","building"]);
   try {
-    const res=await fetch(`https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(q)}&format=json&addressdetails=1&limit=7&accept-language=en`,{headers:{Accept:"application/json"}});
+    const res=await fetch(`https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(q)}&format=json&addressdetails=1&limit=7&accept-language=${DEVICE_LANG},en`,{headers:{Accept:"application/json"}});
     if(!res.ok) return [];
     const rows=await res.json();
     const seen=new Set(),out=[];
@@ -814,7 +846,7 @@ function TripsView({ trips, loading, onBack, onDelete, onLoad }) {
 // ═══════════════════════════════════════════════════
 //  TIMELINE VIEW (plan tab)
 // ═══════════════════════════════════════════════════
-function TimelineView({ timeline, planIds, onRemove, onMove, onFocus, onDragStart, onDragOver, onDragEnd, dragId, onSave, user }) {
+function TimelineView({ timeline, planIds, onRemove, onMove, onFocus, onDragStart, onDragOver, onDragEnd, dragId, onSave, user, nameOf=(p=>p.name) }) {
   if (!timeline.length) return (
     <div style={{textAlign:"center",padding:"28px 0",color:"#94a3b8"}}>
       <p style={{fontSize:13,marginBottom:10}}>Your plan is empty.</p>
@@ -879,7 +911,7 @@ function TimelineView({ timeline, planIds, onRemove, onMove, onFocus, onDragStar
                   {/* Text */}
                   <div style={{flex:1,minWidth:0}}>
                     <button onClick={()=>onFocus(stop)} style={{background:"none",border:"none",cursor:"pointer",padding:0,fontWeight:700,fontSize:13,textAlign:"left",width:"100%",overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",color:"#0f172a"}}>
-                      {stop.name}
+                      {nameOf(stop)}
                     </button>
                     <div style={{display:"flex",alignItems:"center",gap:8,marginTop:2,flexWrap:"wrap"}}>
                       <span style={{fontSize:11,color:"#64748b",fontWeight:500}}>{stop.actLabel}</span>
@@ -961,13 +993,19 @@ function App() {
   const [translations,setTranslations]=useState(new Map());
   async function translateName(p){
     if(translations.has(p.id)) return;
+    const src=p.nameLocal||p.name;
+    const srcLang=guessLang(src);
+    // Unknown script or already in the device language → nothing to translate
+    if(!srcLang||srcLang===DEVICE_LANG){ setTranslations(m=>new Map(m).set(p.id,{text:null,loading:false})); return; }
     setTranslations(m=>new Map(m).set(p.id,{text:null,loading:true}));
     try{
-      const res=await fetch(`https://api.mymemory.translated.net/get?q=${encodeURIComponent(p.nameLocal)}&langpair=auto|en`);
+      const res=await fetch(`https://api.mymemory.translated.net/get?q=${encodeURIComponent(src)}&langpair=${srcLang}|${DEVICE_LANG}`);
       const d=await res.json();
-      const t=d?.responseData?.translatedText;
-      // Only store if the translation actually differs from the local name
-      setTranslations(m=>new Map(m).set(p.id,{text:(t&&t.toLowerCase()!==p.nameLocal?.toLowerCase())?t:null,loading:false}));
+      let t=d?.responseStatus===200?d?.responseData?.translatedText:null;
+      // MyMemory returns error strings as "translations" — never show those
+      if(t&&/INVALID|LANGPAIR|QUERY LENGTH|MYMEMORY|TRANSLATED\.NET/i.test(t)) t=null;
+      // Only store if the translation actually differs from the source name
+      setTranslations(m=>new Map(m).set(p.id,{text:(t&&t.toLowerCase()!==src.toLowerCase())?t:null,loading:false}));
     }catch{
       setTranslations(m=>new Map(m).set(p.id,{text:null,loading:false}));
     }
@@ -1012,7 +1050,10 @@ function App() {
 
   // Route for map (plan coords in order)
   const planRoute = useMemo(()=>plan.map(p=>({lat:p.lat,lng:p.lng})),[plan]);
-  const planMarkers = useMemo(()=>plan.map((p,i)=>({id:p.id,lat:p.lat,lng:p.lng,num:i+1,name:`${i+1}. ${p.name}`})),[plan]);
+  // Display name: prefer an on-demand translation when we have one
+  const dispName=p=>translations.get(p.id)?.text||p.name;
+
+  const planMarkers = useMemo(()=>plan.map((p,i)=>({id:p.id,lat:p.lat,lng:p.lng,num:i+1,name:`${i+1}. ${dispName(p)}`})),[plan,translations]);
   const planIds = useMemo(()=>new Set(plan.map(p=>p.id)),[plan]);
 
   // Scroll the highlighted list item into view (e.g. after clicking a map pin)
@@ -1068,6 +1109,17 @@ function App() {
     return out.sort((a,b)=>a.distance_km-b.distance_km);
   },[pois,selCats,distBand,perCat]);
 
+  // Visible places that still render in a non-Latin script (no localized/romanized
+  // tag existed) get translated automatically — mirrors what Google Maps/Waze do.
+  // Capped per pass to respect the free translator's per-user quota.
+  useEffect(()=>{
+    const queued=new Set(); const targets=[];
+    for(const p of [...plan,...filtered]){
+      if(!queued.has(p.id)&&!isLatinish(p.name)&&!translations.has(p.id)){ queued.add(p.id); targets.push(p); }
+    }
+    targets.slice(0,30).forEach(p=>translateName(p));
+  },[plan,filtered,translations]);
+
   // Group by category in the order the user SELECTED them, sorted closest-first within each
   const groupedByCat=useMemo(()=>{
     const g=new Map();
@@ -1081,9 +1133,9 @@ function App() {
   const poiMarkers = useMemo(()=>
     !placesShown ? [] :
     filtered.filter(p=>!planIds.has(p.id)).slice(0,250).map(p=>({
-      id:p.id,lat:p.lat,lng:p.lng,color:BAND_COLOR[p.band],name:p.name
+      id:p.id,lat:p.lat,lng:p.lng,color:BAND_COLOR[p.band],name:dispName(p)
     })),
-    [filtered,planIds,placesShown]
+    [filtered,planIds,placesShown,translations]
   );
 
   const mapCenter = mapFocus??(destination?{lat:destination.lat,lng:destination.lng}:gpsCoords??null);
@@ -1490,8 +1542,8 @@ function App() {
                                       <button onClick={()=>focusItem(p)} style={{background:"none",border:"none",cursor:"pointer",padding:0,fontWeight:600,fontSize:13,textAlign:"left",overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",color:"#0f172a",flex:1,minWidth:0}}>
                                         {(()=>{const tr=translations.get(p.id);return tr?.text||p.name;})()}
                                       </button>
-                                      {/* 🌐 button: only when a local (non-English) name exists */}
-                                      {p.nameLocal&&(()=>{
+                                      {/* 🌐 button: when a local-script name exists or the display name is non-Latin */}
+                                      {(p.nameLocal||!isLatinish(p.name))&&(()=>{
                                         const tr=translations.get(p.id);
                                         if(tr?.loading) return <span style={{fontSize:10,color:"#94a3b8",flexShrink:0}}>…</span>;
                                         if(tr?.text) return null;
@@ -1621,6 +1673,7 @@ function App() {
                       dragId={dragId}
                       onSave={saveTrip}
                       user={user}
+                      nameOf={dispName}
                     />
                   </div>
                 )}
