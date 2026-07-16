@@ -399,10 +399,13 @@ async function runOverpass(query, signal) {
     new Promise((resolve, reject) => {
       timers[i] = setTimeout(() => {
         if (signal?.aborted || acs[i].signal.aborted) return reject(new Error("aborted"));
+        // Hard client-side timeout: a hung/rate-limited mirror must FAIL, not hang the app
+        const kill = setTimeout(() => acs[i].abort(), 12_000);
         fetch(url, { method:"POST", body, headers, signal: acs[i].signal })
           .then(r => r.ok ? r.json() : Promise.reject(new Error("bad status")))
           .then(d => Array.isArray(d?.elements) ? resolve(d.elements) : reject(new Error("no elements")))
-          .catch(reject);
+          .catch(reject)
+          .finally(() => clearTimeout(kill));
       }, STAGGER[i]);
     })
   );
@@ -477,39 +480,33 @@ async function fetchNominatimFallback(origin, radiusM, thinCats, signal) {
 
 const _poiCache=new Map(), CACHE_TTL=5*60_000;
 
-async function fetchNearbyPOIs(origin, radiusM=25_000, signal, onPartial) {
-  const ck=`${origin.lat.toFixed(2)}|${origin.lng.toFixed(2)}`; // ~1 km grid → cache survives small pans
-  const hit=_poiCache.get(ck);
-  if(hit&&Date.now()-hit.ts<CACHE_TTL){ onPartial?.(hit.pois,{done:true}); return hit.pois; }
+// Persistent cache: destinations you've loaded before come back instantly,
+// even after closing the tab. LRU-capped to stay well under the storage quota.
+const LS_PREFIX="tfpoi:", LS_TTL=6*60*60_000, LS_MAX_KEYS=6;
+function lsGetPois(ck){
+  try{
+    const raw=localStorage.getItem(LS_PREFIX+ck); if(!raw) return null;
+    const {ts,pois}=JSON.parse(raw);
+    if(!Array.isArray(pois)||Date.now()-ts>LS_TTL){ localStorage.removeItem(LS_PREFIX+ck); return null; }
+    return pois;
+  }catch{ return null; }
+}
+function lsSetPois(ck,pois){
+  try{
+    const keys=[];
+    for(let i=0;i<localStorage.length;i++){ const k=localStorage.key(i); if(k&&k.startsWith(LS_PREFIX)) keys.push(k); }
+    if(keys.length>=LS_MAX_KEYS){
+      keys.map(k=>{let ts=0;try{ts=JSON.parse(localStorage.getItem(k)).ts??0;}catch{} return {k,ts};})
+          .sort((a,b)=>a.ts-b.ts)
+          .slice(0,keys.length-LS_MAX_KEYS+1)
+          .forEach(({k})=>localStorage.removeItem(k));
+    }
+    localStorage.setItem(LS_PREFIX+ck,JSON.stringify({ts:Date.now(),pois}));
+  }catch{} // quota exceeded → just skip persisting
+}
 
-  const {lat,lng}=origin;
-  const r5=Math.min(radiusM,5_000),r8=Math.min(radiusM,8_000),r12=Math.min(radiusM,12_000),r25=Math.min(radiusM,25_000);
-
-  // ONE combined query → was 12+ sequential requests in original app
-  const query=`[out:json][timeout:22];(
-    nwr["amenity"~"^(restaurant|fast_food|food_court)$"](around:${r5},${lat},${lng});
-    nwr["amenity"~"^(cafe|bar|pub|biergarten)$"](around:${r5},${lat},${lng});
-    nwr["amenity"="nightclub"](around:${r5},${lat},${lng});
-    nwr["amenity"~"^(spa|sauna)$"](around:${r8},${lat},${lng});
-    nwr["leisure"="spa"](around:${r8},${lat},${lng});
-    nwr["tourism"~"^(museum|gallery)$"](around:${r12},${lat},${lng});
-    nwr["tourism"="viewpoint"](around:${r25},${lat},${lng});
-    nwr["tourism"~"^(attraction|theme_park|zoo|aquarium)$"](around:${r12},${lat},${lng});
-    nwr["natural"="beach"](around:${r25},${lat},${lng});
-    nwr["natural"~"^(peak|cliff)$"](around:${r25},${lat},${lng});
-    nwr["leisure"~"^(park|garden|nature_reserve)$"](around:${r12},${lat},${lng});
-    nwr["leisure"="sports_centre"](around:${r12},${lat},${lng});
-    nwr["historic"](around:${r12},${lat},${lng});
-    nwr["shop"~"^(mall|department_store|marketplace)$"](around:${r8},${lat},${lng});
-    nwr["route"~"^(hiking|bicycle|mtb)$"](around:${r25},${lat},${lng});
-    nwr["sport"~"^(climbing|scuba_diving|surfing|kitesurfing|canoeing|kayaking|rafting|paragliding)$"](around:${r25},${lat},${lng});
-    nwr["tourism"~"^(hotel|hostel|guest_house|motel|apartment|chalet|resort)$"](around:${r25},${lat},${lng});
-    nwr["shop"="travel_agency"](around:${r12},${lat},${lng});
-    nwr["amenity"="tour_guide"](around:${r12},${lat},${lng});
-  );out center tags 700;`;
-
-  const elements=await runOverpass(query,signal);
-  const seen=new Set(),out=[];
+// Shared Overpass element → POI parser (dedupes via the caller's `seen` set)
+function parseOverpassElements(elements, origin, seen, out){
   for(const el of elements){
     const tags=el.tags??{};
     // Prefer English name; keep local name as subtitle when it differs
@@ -525,31 +522,79 @@ async function fetchNearbyPOIs(origin, radiusM=25_000, signal, onPartial) {
     if(seen.has(k)) continue; seen.add(k);
     out.push({id:`${el.type[0]}${el.id}`,name,nameLocal:nameLocalDiff,category:cat,subtype:subtypeOf(tags),lat:elat,lng:elng,distance_km:km,band:bandFor(km),effort:effortFor(km),tags});
   }
-  out.sort((a,b)=>a.distance_km-b.distance_km);
+}
 
-  // PHASE 1 — show the Overpass results immediately (this is what the user sees fast).
-  onPartial?.(out.slice(),{done:false});
+async function fetchNearbyPOIs(origin, radiusM=25_000, signal, onPartial) {
+  const ck=`${origin.lat.toFixed(2)}|${origin.lng.toFixed(2)}`; // ~1 km grid → cache survives small pans
+  const hit=_poiCache.get(ck);
+  if(hit&&Date.now()-hit.ts<CACHE_TTL){ onPartial?.(hit.pois,{done:true}); return hit.pois; }
+  // Persistent cache: repeat destinations are instant even across sessions
+  const stored=lsGetPois(ck);
+  if(stored&&stored.length){ _poiCache.set(ck,{ts:Date.now(),pois:stored}); onPartial?.(stored,{done:true}); return stored; }
 
-  // PHASE 2 — enrich in the background: Wikipedia + Nominatim run in PARALLEL, not in series.
+  const {lat,lng}=origin;
+  // Query builder: same 19 filters, parameterized radii so we can fire a cheap
+  // small-radius query (fast first paint) and the full-radius one in parallel.
+  const buildQuery=(rs,rm,rl,rx,limit,tmo)=>`[out:json][timeout:${tmo}];(
+    nwr["amenity"~"^(restaurant|fast_food|food_court)$"](around:${rs},${lat},${lng});
+    nwr["amenity"~"^(cafe|bar|pub|biergarten)$"](around:${rs},${lat},${lng});
+    nwr["amenity"="nightclub"](around:${rs},${lat},${lng});
+    nwr["amenity"~"^(spa|sauna)$"](around:${rm},${lat},${lng});
+    nwr["leisure"="spa"](around:${rm},${lat},${lng});
+    nwr["tourism"~"^(museum|gallery)$"](around:${rl},${lat},${lng});
+    nwr["tourism"="viewpoint"](around:${rx},${lat},${lng});
+    nwr["tourism"~"^(attraction|theme_park|zoo|aquarium)$"](around:${rl},${lat},${lng});
+    nwr["natural"="beach"](around:${rx},${lat},${lng});
+    nwr["natural"~"^(peak|cliff)$"](around:${rx},${lat},${lng});
+    nwr["leisure"~"^(park|garden|nature_reserve)$"](around:${rl},${lat},${lng});
+    nwr["leisure"="sports_centre"](around:${rl},${lat},${lng});
+    nwr["historic"](around:${rl},${lat},${lng});
+    nwr["shop"~"^(mall|department_store|marketplace)$"](around:${rm},${lat},${lng});
+    nwr["route"~"^(hiking|bicycle|mtb)$"](around:${rx},${lat},${lng});
+    nwr["sport"~"^(climbing|scuba_diving|surfing|kitesurfing|canoeing|kayaking|rafting|paragliding)$"](around:${rx},${lat},${lng});
+    nwr["tourism"~"^(hotel|hostel|guest_house|motel|apartment|chalet|resort)$"](around:${rx},${lat},${lng});
+    nwr["shop"="travel_agency"](around:${rl},${lat},${lng});
+    nwr["amenity"="tour_guide"](around:${rl},${lat},${lng});
+  );out center tags ${limit};`;
+
+  const m=(v)=>Math.min(radiusM,v);
+  // STAGE A — small radii, cheap for the server → answers in ~1-3s and covers the
+  // zone where nearly all plan stops live anyway.
+  const quickP=runOverpass(buildQuery(m(2_500),m(4_000),m(6_000),m(10_000),250,8),signal);
+  // STAGE B — full radii, fired IN PARALLEL (not after) → adds the far-out places.
+  const fullP=runOverpass(buildQuery(m(5_000),m(8_000),m(12_000),m(25_000),700,22),signal);
+
+  const seen=new Set(),out=[];
+  const mergeList=(list)=>{
+    let added=false;
+    for(const p of list){
+      const k=`${p.name.toLowerCase()}|${p.lat.toFixed(4)}|${p.lng.toFixed(4)}`;
+      if(!seen.has(k)){seen.add(k);out.push(p);added=true;}
+    }
+    return added;
+  };
+  const emit=(done)=>{ out.sort((a,b)=>a.distance_km-b.distance_km); onPartial?.(out.slice(),{done}); };
+
+  // Every source paints the moment it lands — whichever answers first wins the
+  // first render, so a slow/rate-limited Overpass can't hold the UI hostage.
+  const wikiP=fetchWikipediaPOIs(origin,radiusM,signal).catch(()=>[]);
+  const quickDone=quickP.then(els=>{ parseOverpassElements(els,origin,seen,out); if(out.length) emit(false); }).catch(()=>{});
+  const wikiDone =wikiP.then(list=>{ if(mergeList(list)) emit(false); }).catch(()=>{});
+  const fullDone =fullP.then(els=>{ parseOverpassElements(els,origin,seen,out); if(out.length) emit(false); }).catch(()=>{});
+
+  // Once the two FAST sources settle, top up thin categories via Nominatim
+  // without waiting for the slow full-radius query.
+  await Promise.allSettled([quickDone,wikiDone]);
+  let nomDone=Promise.resolve();
   if(!signal?.aborted){
     const counts=new Map();
     for(const p of out) counts.set(p.category,(counts.get(p.category)??0)+1);
     const thin=ALL_CATS.filter(c=>(counts.get(c)??0)<3);
-    const tasks=[];
-    // Wikipedia always runs — it's parallel and non-blocking, so it's free extra coverage
-    tasks.push(fetchWikipediaPOIs(origin,radiusM,signal));
-    if(thin.length) tasks.push(fetchNominatimFallback(origin,radiusM,thin,signal));
-    if(tasks.length && !signal?.aborted){
-      const extra=(await Promise.all(tasks)).flat();
-      let added=false;
-      for(const p of extra){
-        const k=`${p.name.toLowerCase()}|${p.lat.toFixed(4)}|${p.lng.toFixed(4)}`;
-        if(!seen.has(k)){seen.add(k);out.push(p);added=true;}
-      }
-      if(added) out.sort((a,b)=>a.distance_km-b.distance_km);
-    }
+    if(thin.length) nomDone=fetchNominatimFallback(origin,radiusM,thin,signal).then(list=>{ if(mergeList(list)) emit(false); }).catch(()=>{});
   }
-  if(out.length>0) _poiCache.set(ck,{ts:Date.now(),pois:out});
+
+  await Promise.allSettled([fullDone,nomDone]);
+  if(out.length>0){ _poiCache.set(ck,{ts:Date.now(),pois:out}); lsSetPois(ck,out); }
   onPartial?.(out.slice(),{done:true});
   return out;
 }
@@ -1003,7 +1048,8 @@ function App() {
       fetchNearbyPOIs(origin,25_000,ac.signal,(partial,{done})=>{
         if(cancelled) return;
         setPois(Array.isArray(partial)?partial:[]);
-        if(!gotFirst){gotFirst=true;setPoisLoading(false);}   // stop the spinner as soon as the first batch lands
+        // stop the spinner on the first NON-EMPTY batch (or when fully done)
+        if(!gotFirst&&(partial.length>0||done)){gotFirst=true;setPoisLoading(false);}
         setPoisEnriching(!done);                              // keep a subtle "finding more…" hint while enriching
       })
         .catch(()=>{if(!cancelled&&!gotFirst){setPois([]);setPoisError("Places took too long — try again in a moment.");}})
